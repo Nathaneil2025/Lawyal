@@ -32,14 +32,22 @@ jobs:
           aws dynamodb scan --table-name terraform-locks --region eu-central-1 --query "Items[].LockID.S" --output text | \
           xargs -r -I {} aws dynamodb delete-item --table-name terraform-locks --key "{\"LockID\":{\"S\":\"{}\"}}" --region eu-central-1
 
-      - name: Update kubeconfig for EKS
+      - name: Update kubeconfig for EKS (if cluster exists)
         run: |
-          aws eks update-kubeconfig --region eu-central-1 --name lawyal-eks
+          if aws eks describe-cluster --name lawyal-eks --region eu-central-1 >/dev/null 2>&1; then
+            aws eks update-kubeconfig --region eu-central-1 --name lawyal-eks
+          else
+            echo "Cluster not found, skipping kubeconfig update"
+          fi
 
-      - name: Delete Kubernetes Workloads
+      - name: Delete Kubernetes Workloads (if cluster exists)
         run: |
-          kubectl delete svc flask-app --ignore-not-found
-          kubectl delete deployment flask-app --ignore-not-found
+          if aws eks describe-cluster --name lawyal-eks --region eu-central-1 >/dev/null 2>&1; then
+            kubectl delete svc flask-app --ignore-not-found || true
+            kubectl delete deployment flask-app --ignore-not-found || true
+          else
+            echo "Cluster not found, skipping kubectl cleanup"
+          fi
 
       - name: Force cleanup ENIs (if any remain)
         run: |
