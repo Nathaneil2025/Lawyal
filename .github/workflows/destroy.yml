@@ -51,8 +51,23 @@ jobs:
 
       - name: Force cleanup ENIs (if any remain)
         run: |
-          aws ec2 describe-network-interfaces --region eu-central-1 --query "NetworkInterfaces[].NetworkInterfaceId" --output text | \
-          xargs -r -n1 aws ec2 delete-network-interface --network-interface-id || true
+          VPC_ID=$(terraform output -raw vpc_id || echo "")
+          if [ -n "$VPC_ID" ]; then
+            aws ec2 describe-network-interfaces --region eu-central-1 --filters Name=vpc-id,Values=$VPC_ID \
+              --query "NetworkInterfaces[].NetworkInterfaceId" --output text | \
+              xargs -r -n1 aws ec2 delete-network-interface --network-interface-id || true
+          fi
+
+      - name: Force cleanup Security Groups in VPC
+        run: |
+          VPC_ID=$(terraform output -raw vpc_id || echo "")
+          if [ -n "$VPC_ID" ]; then
+            SG_IDS=$(aws ec2 describe-security-groups --region eu-central-1 --filters Name=vpc-id,Values=$VPC_ID --query "SecurityGroups[].GroupId" --output text)
+            for SG in $SG_IDS; do
+              echo "Deleting SG: $SG"
+              aws ec2 delete-security-group --group-id $SG --region eu-central-1 || true
+            done
+          fi
 
       - name: Terraform Init
         run: terraform init
