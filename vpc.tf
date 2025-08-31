@@ -28,4 +28,18 @@ resource "aws_subnet" "public" {
   tags = {
     Name                                     = "${var.project_name}-public-${var.az_public}"
     "kubernetes.io/role/elb"                 = "1"
-    "kubernetes.io/cluster/${var.project_name}-eks" = "shared_
+    "kubernetes.io/cluster/${var.project_name}-eks" = "shared"
+  }
+}
+
+resource "aws_subnet" "private" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.private_subnet_cidr
+  availability_zone = var.az_private
+
+  tags = {
+    Name                                           = "${var.project_name}-private-${var.az_private}"
+    "kubernetes.io/role/internal-elb"              = "1"
+    "kubernetes.io/cluster/${var.project_name}-eks" = "shared"
+  }
+}
