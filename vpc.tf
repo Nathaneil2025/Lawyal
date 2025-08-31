@@ -17,14 +17,6 @@ resource "aws_internet_gateway" "igw" {
     Name    = "${var.project_name}-igw"
     Project = var.project_name
   }
-
-  # Ensure IGW destroys last
-  depends_on = [
-    aws_route_table_association.public_assoc,
-    aws_route_table_association.private_assoc,
-    aws_nat_gateway.nat,
-    aws_eip.nat
-  ]
 }
 
 resource "aws_subnet" "public" {
@@ -36,89 +28,4 @@ resource "aws_subnet" "public" {
   tags = {
     Name                                     = "${var.project_name}-public-${var.az_public}"
     "kubernetes.io/role/elb"                 = "1"
-    "kubernetes.io/cluster/${var.project_name}-eks" = "shared"
-  }
-
-  depends_on = [
-    aws_route_table_association.public_assoc
-  ]
-}
-
-resource "aws_subnet" "private" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = var.private_subnet_cidr
-  availability_zone = var.az_private
-
-  tags = {
-    Name                                           = "${var.project_name}-private-${var.az_private}"
-    "kubernetes.io/role/internal-elb"              = "1"
-    "kubernetes.io/cluster/${var.project_name}-eks" = "shared"
-  }
-
-  depends_on = [
-    aws_route_table_association.private_assoc
-  ]
-}
-
-resource "aws_eip" "nat" {
-  domain = "vpc"
-
-  tags = {
-    Name    = "${var.project_name}-nat-eip"
-    Project = var.project_name
-  }
-}
-
-resource "aws_nat_gateway" "nat" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public.id
-
-  tags = {
-    Name    = "${var.project_name}-nat"
-    Project = var.project_name
-  }
-
-  # Make sure NAT gateway is only deleted after IGW + public route table association
-  depends_on = [
-    aws_internet_gateway.igw,
-    aws_route_table_association.public_assoc
-  ]
-}
-
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.igw.id
-  }
-
-  tags = {
-    Name    = "${var.project_name}-public-rt"
-    Project = var.project_name
-  }
-}
-
-resource "aws_route_table_association" "public_assoc" {
-  route_table_id = aws_route_table.public.id
-  subnet_id      = aws_subnet.public.id
-}
-
-resource "aws_route_table" "private" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.nat.id
-  }
-
-  tags = {
-    Name    = "${var.project_name}-private-rt"
-    Project = var.project_name
-  }
-}
-
-resource "aws_route_table_association" "private_assoc" {
-  route_table_id = aws_route_table.private.id
-  subnet_id      = aws_subnet.private.id
-}
+    "kubernetes.io/cluster/${var.project_name}-eks" = "shared_
