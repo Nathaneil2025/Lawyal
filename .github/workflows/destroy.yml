@@ -29,8 +29,12 @@ jobs:
 
       - name: Cleanup stale Terraform locks
         run: |
-          aws dynamodb scan --table-name terraform-locks --region eu-central-1 --query "Items[].LockID.S" --output text | \
-          xargs -r -I {} aws dynamodb delete-item --table-name terraform-locks --key "{\"LockID\":{\"S\":\"{}\"}}" --region eu-central-1
+          aws dynamodb scan --table-name terraform-locks --region eu-central-1 \
+            --query "Items[].LockID.S" --output text | \
+          xargs -r -I {} aws dynamodb delete-item \
+            --table-name terraform-locks \
+            --key "{\"LockID\":{\"S\":\"{}\"}}" \
+            --region eu-central-1
 
       - name: Update kubeconfig for EKS (if cluster exists)
         run: |
@@ -49,24 +53,34 @@ jobs:
             echo "Cluster not found, skipping kubectl cleanup"
           fi
 
-      - name: Force cleanup ENIs (if any remain)
+      - name: Force cleanup ENIs (tag-based lookup)
         run: |
-          VPC_ID=$(terraform output -raw vpc_id || echo "")
+          VPC_ID=$(aws ec2 describe-vpcs --region eu-central-1 \
+            --filters "Name=tag:Name,Values=lawyal-vpc" \
+            --query "Vpcs[].VpcId" --output text)
           if [ -n "$VPC_ID" ]; then
+            echo "Cleaning ENIs in VPC $VPC_ID"
             aws ec2 describe-network-interfaces --region eu-central-1 --filters Name=vpc-id,Values=$VPC_ID \
               --query "NetworkInterfaces[].NetworkInterfaceId" --output text | \
               xargs -r -n1 aws ec2 delete-network-interface --network-interface-id || true
+          else
+            echo "No VPC found, skipping ENI cleanup"
           fi
 
       - name: Force cleanup Security Groups in VPC
         run: |
-          VPC_ID=$(terraform output -raw vpc_id || echo "")
+          VPC_ID=$(aws ec2 describe-vpcs --region eu-central-1 \
+            --filters "Name=tag:Name,Values=lawyal-vpc" \
+            --query "Vpcs[].VpcId" --output text)
           if [ -n "$VPC_ID" ]; then
+            echo "Cleaning SGs in VPC $VPC_ID"
             SG_IDS=$(aws ec2 describe-security-groups --region eu-central-1 --filters Name=vpc-id,Values=$VPC_ID --query "SecurityGroups[].GroupId" --output text)
             for SG in $SG_IDS; do
               echo "Deleting SG: $SG"
               aws ec2 delete-security-group --group-id $SG --region eu-central-1 || true
             done
+          else
+            echo "No VPC found, skipping SG cleanup"
           fi
 
       - name: Terraform Init
@@ -74,3 +88,12 @@ jobs:
 
       - name: Terraform Destroy
         run: terraform destroy -auto-approve -parallelism=1
+
+      - name: Final verification
+        run: |
+          echo "Remaining VPCs:"
+          aws ec2 describe-vpcs --region eu-central-1 --query "Vpcs[].VpcId"
+          echo "Remaining ENIs:"
+          aws ec2 describe-network-interfaces --region eu-central-1 --query "NetworkInterfaces[].NetworkInterfaceId"
+          echo "Remaining SGs:"
+          aws ec2 describe-security-groups --region eu-central-1 --query "SecurityGroups[].GroupId"
