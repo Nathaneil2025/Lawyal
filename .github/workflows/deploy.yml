@@ -13,7 +13,7 @@ jobs:
     env:
       ECR_REGISTRY: 518394500999.dkr.ecr.eu-central-1.amazonaws.com
       ECR_REPOSITORY: lawyal/flask-app
-      IMAGE_TAG: sha-${{ github.sha }}
+      IMAGE_TAG: sha-${{ github.sha }}   # traceable tag
 
     steps:
       - name: Checkout repository
@@ -28,21 +28,26 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
+      - name: Cleanup stale Terraform locks
+        run: |
+          aws dynamodb scan --table-name terraform-locks --region eu-central-1 --query "Items[].LockID.S" --output text | xargs -r -I {} aws dynamodb delete-item --table-name terraform-locks --key "{\"LockID\":{\"S\":\"{}\"}}" --region eu-central-1
+
       - name: Terraform Init
         run: terraform init
 
       - name: Terraform Apply
         run: terraform apply -auto-approve
 
-      - name: Build & Push Docker image
-        run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name $(terraform output -raw eks_cluster_name) --region eu-central-1
+
+      - name: Build & Push Docker image
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./app
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin $ECR_REGISTRY
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
       - name: Deploy with Helm
         run: |
