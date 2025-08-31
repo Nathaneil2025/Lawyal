@@ -29,67 +29,23 @@ jobs:
 
       - name: Cleanup stale Terraform locks
         run: |
-          aws dynamodb scan --table-name terraform-locks --region eu-central-1 \
-            --query "Items[].LockID.S" --output text | \
-          xargs -r -I {} aws dynamodb delete-item \
+          echo "Checking for stale DynamoDB locks..."
+          LOCK_IDS=$(aws dynamodb scan \
             --table-name terraform-locks \
-            --key "{\"LockID\":{\"S\":\"{}\"}}" \
-            --region eu-central-1
+            --region eu-central-1 \
+            --query "Items[].LockID.S" \
+            --output text || true)
 
-      - name: Update kubeconfig for EKS (if cluster exists)
-        run: |
-          if aws eks describe-cluster --name lawyal-eks --region eu-central-1 >/dev/null 2>&1; then
-            aws eks update-kubeconfig --region eu-central-1 --name lawyal-eks
+          if [ -z "$LOCK_IDS" ]; then
+            echo "✅ No stale locks found."
           else
-            echo "Cluster not found, skipping kubeconfig update"
-          fi
-
-      - name: Helm Uninstall App (if cluster exists)
-        run: |
-          if aws eks describe-cluster --name lawyal-eks --region eu-central-1 >/dev/null 2>&1; then
-            helm uninstall flask-app || true
-          else
-            echo "Cluster not found, skipping helm uninstall"
-          fi
-
-      - name: Force cleanup ENIs (tag-based lookup)
-        run: |
-          VPC_ID=$(aws ec2 describe-vpcs --region eu-central-1 \
-            --filters "Name=tag:Name,Values=lawyal-vpc" \
-            --query "Vpcs[].VpcId" --output text)
-          if [ -n "$VPC_ID" ]; then
-            echo "Cleaning ENIs in VPC $VPC_ID"
-            aws ec2 describe-network-interfaces --region eu-central-1 --filters Name=vpc-id,Values=$VPC_ID \
-              --query "NetworkInterfaces[].NetworkInterfaceId" --output text | \
-              xargs -r -n1 aws ec2 delete-network-interface --network-interface-id || true
-          else
-            echo "No VPC found, skipping ENI cleanup"
-          fi
-
-      - name: Force cleanup Security Groups in VPC
-        run: |
-          VPC_ID=$(aws ec2 describe-vpcs --region eu-central-1 \
-            --filters "Name=tag:Name,Values=lawyal-vpc" \
-            --query "Vpcs[].VpcId" --output text)
-          if [ -n "$VPC_ID" ]; then
-            echo "Cleaning SGs in VPC $VPC_ID"
-            SG_IDS=$(aws ec2 describe-security-groups --region eu-central-1 --filters Name=vpc-id,Values=$VPC_ID --query "SecurityGroups[].GroupId" --output text)
-            for SG in $SG_IDS; do
-              echo "Deleting SG: $SG"
-              aws ec2 delete-security-group --group-id $SG --region eu-central-1 || true
+            for id in $LOCK_IDS; do
+              echo "⚡ Deleting stale lock: $id"
+              aws dynamodb delete-item \
+                --table-name terraform-locks \
+                --key "{\"LockID\":{\"S\":\"$id\"}}" \
+                --region eu-central-1 || true
             done
-          else
-            echo "No VPC found, skipping SG cleanup"
-          fi
-
-      - name: Empty ECR repository (purge images)
-        run: |
-          IMAGES=$(aws ecr list-images --repository-name $ECR_REPOSITORY --region eu-central-1 --query 'imageIds[*]' --output json)
-          if [ "$IMAGES" != "[]" ]; then
-            echo "Deleting all images from $ECR_REPOSITORY"
-            aws ecr batch-delete-image --repository-name $ECR_REPOSITORY --region eu-central-1 --image-ids "$IMAGES" || true
-          else
-            echo "No images found in $ECR_REPOSITORY"
           fi
 
       - name: Terraform Init
@@ -97,12 +53,3 @@ jobs:
 
       - name: Terraform Destroy
         run: terraform destroy -auto-approve -parallelism=1
-
-      - name: Final verification
-        run: |
-          echo "Remaining VPCs:"
-          aws ec2 describe-vpcs --region eu-central-1 --query "Vpcs[].VpcId"
-          echo "Remaining ENIs:"
-          aws ec2 describe-network-interfaces --region eu-central-1 --query "NetworkInterfaces[].NetworkInterfaceId"
-          echo "Remaining SGs:"
-          aws ec2 describe-security-groups --region eu-central-1 --query "SecurityGroups[].GroupId"
