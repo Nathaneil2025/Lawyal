@@ -32,7 +32,12 @@ jobs:
           aws dynamodb scan --table-name terraform-locks --region eu-central-1 --query "Items[].LockID.S" --output text | \
           xargs -r -I {} aws dynamodb delete-item --table-name terraform-locks --key "{\"LockID\":{\"S\":\"{}\"}}" --region eu-central-1
 
-      - name: Force cleanup ENIs
+      - name: Delete Kubernetes Workloads
+        run: |
+          kubectl delete svc flask-app --ignore-not-found
+          kubectl delete deployment flask-app --ignore-not-found
+
+      - name: Force cleanup ENIs (if any remain)
         run: |
           aws ec2 describe-network-interfaces --region eu-central-1 --query "NetworkInterfaces[].NetworkInterfaceId" --output text | \
           xargs -r -n1 aws ec2 delete-network-interface --network-interface-id || true
