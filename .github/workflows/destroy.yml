@@ -29,10 +29,16 @@ jobs:
 
       - name: Cleanup stale Terraform locks
         run: |
-          aws dynamodb scan --table-name terraform-locks --region eu-central-1 --query "Items[].LockID.S" --output text | xargs -r -I {} aws dynamodb delete-item --table-name terraform-locks --key "{\"LockID\":{\"S\":\"{}\"}}" --region eu-central-1
+          aws dynamodb scan --table-name terraform-locks --region eu-central-1 --query "Items[].LockID.S" --output text | \
+          xargs -r -I {} aws dynamodb delete-item --table-name terraform-locks --key "{\"LockID\":{\"S\":\"{}\"}}" --region eu-central-1
+
+      - name: Force cleanup ENIs
+        run: |
+          aws ec2 describe-network-interfaces --region eu-central-1 --query "NetworkInterfaces[].NetworkInterfaceId" --output text | \
+          xargs -r -n1 aws ec2 delete-network-interface --network-interface-id || true
 
       - name: Terraform Init
         run: terraform init
 
       - name: Terraform Destroy
-        run: terraform destroy -auto-approve
+        run: terraform destroy -auto-approve -parallelism=1
