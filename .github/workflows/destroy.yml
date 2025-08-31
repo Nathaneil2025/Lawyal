@@ -32,6 +32,10 @@ jobs:
           aws dynamodb scan --table-name terraform-locks --region eu-central-1 --query "Items[].LockID.S" --output text | \
           xargs -r -I {} aws dynamodb delete-item --table-name terraform-locks --key "{\"LockID\":{\"S\":\"{}\"}}" --region eu-central-1
 
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig --region eu-central-1 --name lawyal-eks
+
       - name: Delete Kubernetes Workloads
         run: |
           kubectl delete svc flask-app --ignore-not-found
