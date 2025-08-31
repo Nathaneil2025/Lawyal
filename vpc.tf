@@ -17,6 +17,14 @@ resource "aws_internet_gateway" "igw" {
     Name    = "${var.project_name}-igw"
     Project = var.project_name
   }
+
+  # Ensure IGW destroys last
+  depends_on = [
+    aws_route_table_association.public_assoc,
+    aws_route_table_association.private_assoc,
+    aws_nat_gateway.nat,
+    aws_eip.nat
+  ]
 }
 
 resource "aws_subnet" "public" {
@@ -30,6 +38,10 @@ resource "aws_subnet" "public" {
     "kubernetes.io/role/elb"                 = "1"
     "kubernetes.io/cluster/${var.project_name}-eks" = "shared"
   }
+
+  depends_on = [
+    aws_route_table_association.public_assoc
+  ]
 }
 
 resource "aws_subnet" "private" {
@@ -39,9 +51,13 @@ resource "aws_subnet" "private" {
 
   tags = {
     Name                                           = "${var.project_name}-private-${var.az_private}"
-    "kubernetes.io/role/internal-elb"             = "1"
+    "kubernetes.io/role/internal-elb"              = "1"
     "kubernetes.io/cluster/${var.project_name}-eks" = "shared"
   }
+
+  depends_on = [
+    aws_route_table_association.private_assoc
+  ]
 }
 
 resource "aws_eip" "nat" {
@@ -62,7 +78,11 @@ resource "aws_nat_gateway" "nat" {
     Project = var.project_name
   }
 
-  depends_on = [aws_internet_gateway.igw]
+  # Make sure NAT gateway is only deleted after IGW + public route table association
+  depends_on = [
+    aws_internet_gateway.igw,
+    aws_route_table_association.public_assoc
+  ]
 }
 
 resource "aws_route_table" "public" {
