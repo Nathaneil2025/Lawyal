@@ -83,6 +83,16 @@ jobs:
             echo "No VPC found, skipping SG cleanup"
           fi
 
+      - name: Empty ECR repository (purge images)
+        run: |
+          IMAGES=$(aws ecr list-images --repository-name $ECR_REPOSITORY --region eu-central-1 --query 'imageIds[*]' --output json)
+          if [ "$IMAGES" != "[]" ]; then
+            echo "Deleting all images from $ECR_REPOSITORY"
+            aws ecr batch-delete-image --repository-name $ECR_REPOSITORY --region eu-central-1 --image-ids "$IMAGES" || true
+          else
+            echo "No images found in $ECR_REPOSITORY"
+          fi
+
       - name: Terraform Init
         run: terraform init
 
