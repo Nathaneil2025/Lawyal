@@ -1,7 +1,7 @@
 name: Destroy Infrastructure
 
 on:
-  workflow_dispatch:   # 👈 manual trigger only
+  workflow_dispatch:   # manual trigger only
 
 permissions:
   id-token: write
@@ -23,6 +23,10 @@ jobs:
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
+
+      - name: Cleanup stale Terraform locks
+        run: |
+          aws dynamodb scan --table-name terraform-locks --region eu-central-1 --query "Items[].LockID.S" --output text | xargs -r -I {} aws dynamodb delete-item --table-name terraform-locks --key "{\"LockID\":{\"S\":\"{}\"}}" --region eu-central-1
 
       - name: Terraform Init
         run: terraform init
