@@ -44,13 +44,12 @@ jobs:
             echo "Cluster not found, skipping kubeconfig update"
           fi
 
-      - name: Delete Kubernetes Workloads (if cluster exists)
+      - name: Helm Uninstall App (if cluster exists)
         run: |
           if aws eks describe-cluster --name lawyal-eks --region eu-central-1 >/dev/null 2>&1; then
-            kubectl delete svc flask-app --ignore-not-found || true
-            kubectl delete deployment flask-app --ignore-not-found || true
+            helm uninstall flask-app || true
           else
-            echo "Cluster not found, skipping kubectl cleanup"
+            echo "Cluster not found, skipping helm uninstall"
           fi
 
       - name: Force cleanup ENIs (tag-based lookup)
