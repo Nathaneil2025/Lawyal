@@ -1,29 +1,38 @@
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.main.id
+name: Destroy Infrastructure
 
-  tags = {
-    Name    = "${var.project_name}-igw"
-    Project = var.project_name
-  }
+on:
+  workflow_dispatch:   # 👈 manual trigger only
 
-  depends_on = [
-    aws_route_table_association.public_assoc,
-    aws_route_table_association.private_assoc,
-    aws_nat_gateway.nat,
-    aws_eip.nat
-  ]
-}
+permissions:
+  id-token: write
+  contents: read
 
-resource "aws_nat_gateway" "nat" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public.id
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    env:
+      ECR_REGISTRY: 518394500999.dkr.ecr.eu-central-1.amazonaws.com
+      ECR_REPOSITORY: lawyal/flask-app
 
-  tags = {
-    Name    = "${var.project_name}-nat"
-    Project = var.project_name
-  }
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-  depends_on = [
-    aws_internet_gateway.igw
-  ]
-}
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::518394500999:role/GitHubActionsRole
+          aws-region: eu-central-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Cleanup stale Terraform locks
+        run: |
+          aws dynamodb scan --table-name terraform-locks --region eu-central-1 --query "Items[].LockID.S" --output text | xargs -r -I {} aws dynamodb delete-item --table-name terraform-locks --key "{\"LockID\":{\"S\":\"{}\"}}" --region eu-central-1
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Destroy
+        run: terraform destroy -auto-approve
