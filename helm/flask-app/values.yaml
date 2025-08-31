@@ -1,0 +1,13 @@
+replicaCount: 2
+
+image:
+  repository: 518394500999.dkr.ecr.eu-central-1.amazonaws.com/lawyal/flask-app
+  tag: v1.02
+  pullPolicy: IfNotPresent
+
+service:
+  type: LoadBalancer
+  port: 80
+  targetPort: 5000
+
+resources: {}
