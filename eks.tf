@@ -20,7 +20,6 @@ resource "aws_eks_cluster" "cluster" {
   }
 }
 
-
 # Node group in PUBLIC subnet
 resource "aws_eks_node_group" "public_ng" {
   cluster_name    = aws_eks_cluster.cluster.name
@@ -51,6 +50,7 @@ resource "aws_eks_node_group" "public_ng" {
   }
 
   depends_on = [
+    aws_eks_cluster.cluster,
     aws_security_group_rule.controlplane_to_nodes_ephemeral,
     aws_security_group_rule.controlplane_to_nodes_https
   ]
@@ -85,6 +85,7 @@ resource "aws_eks_node_group" "private_ng" {
   }
 
   depends_on = [
+    aws_eks_cluster.cluster,
     aws_security_group_rule.controlplane_to_nodes_ephemeral,
     aws_security_group_rule.controlplane_to_nodes_https
   ]
