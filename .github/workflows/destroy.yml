@@ -48,8 +48,53 @@ jobs:
             done
           fi
 
+      - name: Uninstall Helm releases
+        run: |
+          echo "Uninstalling Helm release: flask-app"
+          helm uninstall flask-app || true
+
+      - name: Purge ECR repo
+        run: |
+          echo "Purging ECR images..."
+          aws ecr list-images --repository-name $ECR_REPOSITORY --region eu-central-1 --query 'imageIds[*]' --output json | \
+          jq -c '.[]' | while read img; do
+            aws ecr batch-delete-image --repository-name $ECR_REPOSITORY --region eu-central-1 --image-ids "$img" || true
+          done
+          aws ecr delete-repository --repository-name $ECR_REPOSITORY --region eu-central-1 --force || true
+
       - name: Terraform Init
         run: terraform init
 
       - name: Terraform Destroy
-        run: terraform destroy -auto-approve -parallelism=1
+        run: terraform destroy -auto-approve -parallelism=1 || true
+
+      - name: Force cleanup ENIs, EC2, SGs, IGW
+        run: |
+          echo "Cleaning up stray ENIs..."
+          aws ec2 describe-network-interfaces --region eu-central-1 --query "NetworkInterfaces[].NetworkInterfaceId" --output text | \
+          xargs -r -n1 aws ec2 delete-network-interface --network-interface-id || true
+
+          echo "Cleaning up stray EC2 instances..."
+          aws ec2 describe-instances --region eu-central-1 --query "Reservations[].Instances[].InstanceId" --output text | \
+          xargs -r -n1 aws ec2 terminate-instances --instance-ids || true
+
+          echo "Cleaning up stray security groups..."
+          aws ec2 describe-security-groups --region eu-central-1 --query "SecurityGroups[?GroupName!='default'].GroupId" --output text | \
+          xargs -r -n1 aws ec2 delete-security-group --group-id || true
+
+          echo "Cleaning up stray Internet Gateways..."
+          for igw in $(aws ec2 describe-internet-gateways --region eu-central-1 --query "InternetGateways[].InternetGatewayId" --output text); do
+            VPC_ID=$(aws ec2 describe-internet-gateways --internet-gateway-ids $igw --region eu-central-1 --query "InternetGateways[].Attachments[].VpcId" --output text)
+            if [ -n "$VPC_ID" ]; then
+              aws ec2 detach-internet-gateway --internet-gateway-id $igw --vpc-id $VPC_ID || true
+            fi
+            aws ec2 delete-internet-gateway --internet-gateway-id $igw || true
+          done
+
+          echo "Cleaning up stray subnets..."
+          aws ec2 describe-subnets --region eu-central-1 --query "Subnets[].SubnetId" --output text | \
+          xargs -r -n1 aws ec2 delete-subnet --subnet-id || true
+
+          echo "Cleaning up stray VPCs..."
+          aws ec2 describe-vpcs --region eu-central-1 --query "Vpcs[].VpcId" --output text | \
+          xargs -r -n1 aws ec2 delete-vpc --vpc-id || true
