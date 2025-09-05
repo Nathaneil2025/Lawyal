@@ -1,53 +1,125 @@
-      - name: Delete Kubernetes Services (ELBs/ENIs)
+name: Destroy Infrastructure
+
+on:
+  workflow_dispatch:   # 👈 manual trigger only
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: eu-central-1
+      CLUSTER_NAME: lawyal-eks
+      ECR_REPOSITORY: lawyal/flask-app
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::518394500999:role/GitHubActionsRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Cleanup stale Terraform locks
         run: |
-          aws eks update-kubeconfig --region $AWS_REGION --name lawyal-eks || true
-          kubectl delete svc flask-app --ignore-not-found || true
+          echo "Checking for stale DynamoDB locks..."
+          LOCK_IDS=$(aws dynamodb scan \
+            --table-name terraform-locks \
+            --region $AWS_REGION \
+            --query "Items[].LockID.S" \
+            --output text || true)
+
+          for id in $LOCK_IDS; do
+            echo "⚡ Deleting stale lock: $id"
+            aws dynamodb delete-item \
+              --table-name terraform-locks \
+              --key "{\"LockID\":{\"S\":\"$id\"}}" \
+              --region $AWS_REGION || true
+          done
+
+      - name: Uninstall Helm releases
+        run: |
+          echo "⎈ Uninstalling Helm release flask-app..."
           helm uninstall flask-app || true
+          kubectl delete svc flask-app --ignore-not-found || true
 
-      - name: Delete EKS Nodegroups
+      - name: Delete EKS Nodegroups & Cluster
         run: |
-          CLUSTER_NAME=lawyal-eks
-          NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION --query "nodegroups[]" --output text || echo "")
-          if [ -n "$NODEGROUPS" ]; then
-            for ng in $NODEGROUPS; do
-              echo "Deleting nodegroup: $ng"
-              aws eks delete-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
-              aws eks wait nodegroup-deleted --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
-            done
-          fi
+          echo "🧹 Deleting EKS Nodegroups..."
+          for ng in $(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION --query "nodegroups[]" --output text || true); do
+            aws eks delete-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
+            aws eks wait nodegroup-deleted --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
+          done
 
-      - name: Delete EKS Cluster
+          echo "🧹 Deleting EKS Cluster..."
+          aws eks delete-cluster --name $CLUSTER_NAME --region $AWS_REGION || true
+          aws eks wait cluster-deleted --name $CLUSTER_NAME --region $AWS_REGION || true
+
+      - name: Purge ECR repository
         run: |
-          aws eks delete-cluster --name lawyal-eks --region $AWS_REGION || true
-          aws eks wait cluster-deleted --name lawyal-eks --region $AWS_REGION || true
+          echo "🧹 Purging ECR images..."
+          aws ecr list-images --repository-name $ECR_REPOSITORY --region $AWS_REGION --query 'imageIds[*]' --output json | \
+          jq -c '.[]' | while read img; do
+            aws ecr batch-delete-image --repository-name $ECR_REPOSITORY --region $AWS_REGION --image-ids "$img" || true
+          done
+          aws ecr delete-repository --repository-name $ECR_REPOSITORY --region $AWS_REGION --force || true
+
+      - name: Terraform Init
+        run: terraform init -reconfigure
 
       - name: Terraform Destroy
         run: terraform destroy -auto-approve -parallelism=1 || true
 
-      - name: Final Cleanup
+      - name: Force cleanup NATs, EIPs, routes, IGWs, ENIs, SGs, Subnets, VPCs
         run: |
-          echo "Cleaning up stray ENIs..."
-          aws ec2 describe-network-interfaces --region $AWS_REGION --query "NetworkInterfaces[].NetworkInterfaceId" --output text | \
-          xargs -r -n1 aws ec2 delete-network-interface --network-interface-id || true
-
-          echo "Cleaning up NAT gateways..."
+          echo "🧹 Cleaning NAT Gateways..."
           for nat in $(aws ec2 describe-nat-gateways --region $AWS_REGION --query "NatGateways[].NatGatewayId" --output text); do
             aws ec2 delete-nat-gateway --nat-gateway-id $nat --region $AWS_REGION || true
           done
 
-          echo "Cleaning up IGWs..."
+          echo "🧹 Releasing Elastic IPs..."
+          for eip in $(aws ec2 describe-addresses --region $AWS_REGION --query "Addresses[].AllocationId" --output text); do
+            aws ec2 release-address --allocation-id $eip --region $AWS_REGION || true
+          done
+
+          echo "🧹 Deleting Route Tables..."
+          for rtb in $(aws ec2 describe-route-tables --region $AWS_REGION --query "RouteTables[].RouteTableId" --output text); do
+            aws ec2 delete-route-table --route-table-id $rtb --region $AWS_REGION || true
+          done
+
+          echo "🧹 Detaching & Deleting IGWs..."
           for igw in $(aws ec2 describe-internet-gateways --region $AWS_REGION --query "InternetGateways[].InternetGatewayId" --output text); do
             VPC_ID=$(aws ec2 describe-internet-gateways --internet-gateway-ids $igw --region $AWS_REGION --query "InternetGateways[].Attachments[].VpcId" --output text)
             if [ -n "$VPC_ID" ]; then
-              aws ec2 detach-internet-gateway --internet-gateway-id $igw --vpc-id $VPC_ID || true
+              aws ec2 detach-internet-gateway --internet-gateway-id $igw --vpc-id $VPC_ID --region $AWS_REGION || true
             fi
             aws ec2 delete-internet-gateway --internet-gateway-id $igw --region $AWS_REGION || true
           done
 
-          echo "Cleaning up subnets..."
-          aws ec2 describe-subnets --region $AWS_REGION --query "Subnets[].SubnetId" --output text | \
-          xargs -r -n1 aws ec2 delete-subnet --subnet-id || true
+          echo "🧹 Cleaning ENIs..."
+          for eni in $(aws ec2 describe-network-interfaces --region $AWS_REGION --query "NetworkInterfaces[].NetworkInterfaceId" --output text); do
+            aws ec2 delete-network-interface --network-interface-id $eni --region $AWS_REGION || true
+          done
 
-          echo "Cleaning up VPCs..."
-          aws ec2 describe-vpcs --region $AWS_REGION --query "Vpcs[].VpcId" --output text | \
-          xargs -r -n1 aws ec2 delete-vpc --vpc-id || true
+          echo "🧹 Deleting Security Groups..."
+          for sg in $(aws ec2 describe-security-groups --region $AWS_REGION --query "SecurityGroups[?GroupName!='default'].GroupId" --output text); do
+            aws ec2 delete-security-group --group-id $sg --region $AWS_REGION || true
+          done
+
+          echo "🧹 Deleting Subnets..."
+          for subnet in $(aws ec2 describe-subnets --region $AWS_REGION --query "Subnets[].SubnetId" --output text); do
+            aws ec2 delete-subnet --subnet-id $subnet --region $AWS_REGION || true
+          done
+
+          echo "🧹 Deleting VPCs..."
+          for vpc in $(aws ec2 describe-vpcs --region $AWS_REGION --query "Vpcs[].VpcId" --output text); do
+            aws ec2 delete-vpc --vpc-id $vpc --region $AWS_REGION || true
+          done
