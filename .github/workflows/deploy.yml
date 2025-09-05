@@ -62,6 +62,16 @@ jobs:
             sleep 30
           done
 
+      - name: Wait for EKS Nodegroups to be ACTIVE
+        run: |
+          CLUSTER_NAME=$(terraform output -raw eks_cluster_name)
+          NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region eu-central-1 --query "nodegroups[]" --output text)
+          for ng in $NODEGROUPS; do
+            echo "⏳ Waiting for nodegroup $ng to be ACTIVE..."
+            aws eks wait nodegroup-active --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region eu-central-1
+            echo "✅ Nodegroup $ng is ACTIVE!"
+          done
+
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name $(terraform output -raw eks_cluster_name) --region eu-central-1
 
