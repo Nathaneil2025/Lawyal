@@ -64,27 +64,11 @@ jobs:
 
           # Delete Services of type LoadBalancer (they create ALB/NLB + SGs)
           kubectl get svc -A -o json \
-            | jq -r '.items[] | select(.spec.type=="LoadBalancer") | [.metadata.namespace,.metadata.name] | @tsv' \
-            | while IFS=$'\t' read -r ns name; do
-                echo "Deleting LB Service $ns/$name"
-                kubectl delete svc -n "$ns" "$name" --wait=false || true
-              done
-
-          # Delete Ingresses (ALB controller)
-          kubectl get ingress -A --no-headers 2>/dev/null \
-            | awk '{print $1,$2}' \
-            | while read ns name; do
-                echo "Deleting Ingress $ns/$name"
-                kubectl delete ingress -n "$ns" "$name" --wait=false || true
-              done
-
-          # Delete PVCs to release EBS (assuming StorageClass reclaim=Delete)
-          kubectl get pvc -A --no-headers 2>/dev/null \
-            | awk '{print $1,$2}' \
-            | while read ns name; do
-                echo "Deleting PVC $ns/$name"
-                kubectl delete pvc -n "$ns" "$name" --wait=false || true
-              done
+          | jq -r '.items[] | select(.spec.type=="LoadBalancer") | [.metadata.namespace,.metadata.name] | @tsv' \
+          | while IFS=$'\t' read -r ns name; do
+              echo "Deleting LB Service $ns/$name"
+              kubectl delete svc -n "$ns" "$name" --wait=false || true
+            done
 
       # 1b) (Optional but recommended) Remove EKS add-ons (vpc-cni, kube-proxy, coredns, etc.)
       - name: EKS: delete add-ons (best-effort)
