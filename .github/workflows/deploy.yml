@@ -42,9 +42,6 @@ jobs:
 
       - name: Terraform Apply (Infra)
         run: terraform apply -auto-approve
-        
-              - name: Terraform Apply (Infra)
-        run: terraform apply -auto-approve
 
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name $(terraform output -raw eks_cluster_name) --region eu-central-1
