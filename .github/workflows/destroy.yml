@@ -35,7 +35,6 @@ jobs:
             --region $AWS_REGION \
             --query "Items[].LockID.S" \
             --output text || true)
-
           for id in $LOCK_IDS; do
             aws dynamodb delete-item \
               --table-name terraform-locks \
@@ -48,22 +47,29 @@ jobs:
           helm uninstall flask-app || true
           kubectl delete svc flask-app --ignore-not-found || true
 
-      - name: Delete EKS Nodegroups & Cluster
+      - name: Delete EKS Nodegroups
         run: |
-          echo "🧹 Deleting EKS Nodegroups..."
           for ng in $(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION --query "nodegroups[]" --output text || true); do
             aws eks delete-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
+          done
+          for ng in $(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION --query "nodegroups[]" --output text || true); do
             aws eks wait nodegroup-deleted --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
           done
 
-          echo "🧹 Deleting EKS Cluster..."
-          aws eks delete-cluster --name $CLUSTER_NAME --region $AWS_REGION || true
-
-      - name: Wait for EKS Cluster Deletion
+      - name: Terminate stray EC2 instances
         run: |
-          echo "⏳ Waiting until cluster is fully deleted..."
+          IDS=$(aws ec2 describe-instances --region $AWS_REGION \
+            --query "Reservations[].Instances[].InstanceId" \
+            --output text)
+          if [ -n "$IDS" ]; then
+            aws ec2 terminate-instances --instance-ids $IDS --region $AWS_REGION || true
+            aws ec2 wait instance-terminated --instance-ids $IDS --region $AWS_REGION || true
+          fi
+
+      - name: Delete EKS Cluster
+        run: |
+          aws eks delete-cluster --name $CLUSTER_NAME --region $AWS_REGION || true
           aws eks wait cluster-deleted --name $CLUSTER_NAME --region $AWS_REGION || true
-          echo "✅ Cluster deletion confirmed."
 
       - name: Purge ECR repository
         run: |
@@ -88,7 +94,7 @@ jobs:
       - name: Terraform Destroy
         run: terraform destroy -auto-approve -parallelism=1 || true
 
-      - name: Final Force Cleanup (NATs, EIPs, routes, IGWs, ENIs, SGs, Subnets, VPCs)
+      - name: Final Force Cleanup
         run: |
           for nat in $(aws ec2 describe-nat-gateways --region $AWS_REGION --query "NatGateways[].NatGatewayId" --output text); do
             aws ec2 delete-nat-gateway --nat-gateway-id $nat --region $AWS_REGION || true
