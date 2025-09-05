@@ -1,6 +1,6 @@
-# aws-auth.tf
+# Get current AWS account details
+data "aws_caller_identity" "current" {}
 
-# This only manages RBAC access (maps IAM roles/users to Kubernetes RBAC)
 resource "kubernetes_config_map" "aws_auth" {
   metadata {
     name      = "aws-auth"
@@ -15,6 +15,7 @@ resource "kubernetes_config_map" "aws_auth" {
         groups   = ["system:bootstrappers", "system:nodes"]
       }
     ])
+
     mapUsers = jsonencode([
       {
         userarn  = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/Nateuser"
