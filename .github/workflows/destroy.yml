@@ -42,6 +42,10 @@ jobs:
               --region $AWS_REGION || true
           done
 
+      # ✅ ensure kubeconfig is populated before helm/kubectl
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION || true
+
       - name: Uninstall Helm releases
         run: |
           helm uninstall flask-app || true
@@ -49,6 +53,7 @@ jobs:
 
       - name: Delete EKS Nodegroups
         run: |
+          echo "🧹 Deleting EKS Nodegroups..."
           for ng in $(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION --query "nodegroups[]" --output text || true); do
             aws eks delete-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
           done
