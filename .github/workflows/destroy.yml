@@ -72,6 +72,17 @@ jobs:
           done
           aws ecr delete-repository --repository-name $ECR_REPOSITORY --region $AWS_REGION --force || true
 
+      - name: Force delete EKS-managed security groups
+        run: |
+          echo "🧹 Cleaning EKS-managed security groups..."
+          for sg in $(aws ec2 describe-security-groups \
+            --filters "Name=group-name,Values=eks-cluster-sg-*" \
+            --region $AWS_REGION \
+            --query "SecurityGroups[].GroupId" --output text); do
+              echo "Deleting SG: $sg"
+              aws ec2 delete-security-group --group-id $sg --region $AWS_REGION || true
+          done
+
       - name: Terraform Init
         run: terraform init -reconfigure
 

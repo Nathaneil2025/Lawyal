@@ -8,7 +8,10 @@ resource "aws_vpc" "main" {
     Project     = var.project_name
     Environment = "dev"
   }
+
+  depends_on = [aws_eks_cluster.cluster]  # ✅ ensures cluster (and SG) are deleted first
 }
+
 
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.main.id
