@@ -1,15 +1,19 @@
-name: Deploy Infrastructure
+name: Infra Deploy (Infra + Docker Push)
 
 on:
-  workflow_dispatch:   # 👈 manual trigger only
+  workflow_dispatch:   # manual trigger only (safe for infra)
 
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  deploy:
+  infra:
     runs-on: ubuntu-latest
+    env:
+      ECR_REGISTRY: 518394500999.dkr.ecr.eu-central-1.amazonaws.com
+      ECR_REPOSITORY: lawyal/flask-app
+      IMAGE_TAG: sha-${{ github.sha }}
 
     steps:
       - name: Checkout repository
@@ -36,7 +40,7 @@ jobs:
       - name: Terraform Init
         run: terraform init
 
-      - name: Terraform Apply
+      - name: Terraform Apply (Infra)
         run: terraform apply -auto-approve
 
       - name: Wait for EKS Cluster to be ACTIVE
@@ -68,5 +72,10 @@ jobs:
             echo "✅ Nodegroup $ng is ACTIVE!"
           done
 
-      - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name $(terraform output -raw eks_cluster_name) --region eu-central-1
+      - name: Build & Push Docker image
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./app
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin $ECR_REGISTRY
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest

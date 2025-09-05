@@ -1,0 +1,35 @@
+name: App Deploy (Helm)
+
+on:
+  workflow_dispatch:   # manual trigger (can also be push to main if you prefer)
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  app:
+    runs-on: ubuntu-latest
+    env:
+      ECR_REGISTRY: 518394500999.dkr.ecr.eu-central-1.amazonaws.com
+      ECR_REPOSITORY: lawyal/flask-app
+      IMAGE_TAG: sha-${{ github.sha }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::518394500999:role/GitHubActionsRole
+          aws-region: eu-central-1
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name lawyal-eks --region eu-central-1
+
+      - name: Deploy App with Helm
+        run: |
+          helm upgrade --install flask-app ./helm/flask-app \
+            --set image.repository=$ECR_REGISTRY/$ECR_REPOSITORY \
+            --set image.tag=$IMAGE_TAG
