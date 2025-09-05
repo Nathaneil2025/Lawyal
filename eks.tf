@@ -1,3 +1,4 @@
+# EKS Cluster
 resource "aws_eks_cluster" "cluster" {
   name     = "${var.project_name}-eks"
   role_arn = aws_iam_role.eks_cluster_role.arn
@@ -10,10 +11,10 @@ resource "aws_eks_cluster" "cluster" {
   }
 
   depends_on = [
-    aws_vpc.main,                                 # ✅ Wait for VPC
-    aws_subnet.public,                            # ✅ Wait for public subnet
-    aws_subnet.private,                           # ✅ Wait for private subnet
-    aws_internet_gateway.igw,                     # ✅ Ensure IGW exists
+    aws_vpc.main,
+    aws_subnet.public,
+    aws_subnet.private,
+    aws_internet_gateway.igw,
     aws_iam_role_policy_attachment.eks_cluster_AmazonEKSClusterPolicy,
     aws_iam_role_policy_attachment.eks_cluster_VPCResourceController
   ]
@@ -22,6 +23,22 @@ resource "aws_eks_cluster" "cluster" {
     Name    = "${var.project_name}-eks"
     Project = var.project_name
   }
+}
+
+# ✅ Node IAM role policy attachments (MUST have these 3)
+resource "aws_iam_role_policy_attachment" "eks_worker_AmazonEKSWorkerNodePolicy" {
+  role       = aws_iam_role.eks_node_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "eks_worker_AmazonEKS_CNI_Policy" {
+  role       = aws_iam_role.eks_node_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+}
+
+resource "aws_iam_role_policy_attachment" "eks_worker_AmazonEC2ContainerRegistryReadOnly" {
+  role       = aws_iam_role.eks_node_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
 # Node group in PUBLIC subnet
@@ -54,9 +71,12 @@ resource "aws_eks_node_group" "public_ng" {
   }
 
   depends_on = [
-    aws_eks_cluster.cluster,                      # ✅ Wait for cluster
+    aws_eks_cluster.cluster,
     aws_security_group_rule.controlplane_to_nodes_ephemeral,
-    aws_security_group_rule.controlplane_to_nodes_https
+    aws_security_group_rule.controlplane_to_nodes_https,
+    aws_iam_role_policy_attachment.eks_worker_AmazonEKSWorkerNodePolicy,
+    aws_iam_role_policy_attachment.eks_worker_AmazonEKS_CNI_Policy,
+    aws_iam_role_policy_attachment.eks_worker_AmazonEC2ContainerRegistryReadOnly
   ]
 
   tags = {
@@ -89,9 +109,12 @@ resource "aws_eks_node_group" "private_ng" {
   }
 
   depends_on = [
-    aws_eks_cluster.cluster,                      # ✅ Wait for cluster
+    aws_eks_cluster.cluster,
     aws_security_group_rule.controlplane_to_nodes_ephemeral,
-    aws_security_group_rule.controlplane_to_nodes_https
+    aws_security_group_rule.controlplane_to_nodes_https,
+    aws_iam_role_policy_attachment.eks_worker_AmazonEKSWorkerNodePolicy,
+    aws_iam_role_policy_attachment.eks_worker_AmazonEKS_CNI_Policy,
+    aws_iam_role_policy_attachment.eks_worker_AmazonEC2ContainerRegistryReadOnly
   ]
 
   tags = {
