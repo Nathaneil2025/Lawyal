@@ -10,9 +10,16 @@ resource "kubernetes_config_map" "aws_auth" {
   data = {
     mapRoles = jsonencode([
       {
+        # Worker nodes (must stay here)
         rolearn  = aws_iam_role.eks_node_role.arn
         username = "system:node:{{EC2PrivateDNSName}}"
         groups   = ["system:bootstrappers", "system:nodes"]
+      },
+      {
+        # GitHub Actions role → full cluster admin
+        rolearn  = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/GitHubActionsRole"
+        username = "github-runner"
+        groups   = ["system:masters"]
       }
     ])
 
