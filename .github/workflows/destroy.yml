@@ -1,175 +1,141 @@
-name: Destroy Infrastructure
-
-on:
-  workflow_dispatch:   # 👈 manual trigger only
-
-permissions:
-  id-token: write
-  contents: read
-
-jobs:
-  destroy:
-    runs-on: ubuntu-latest
-    env:
-      AWS_REGION: eu-central-1
-      CLUSTER_NAME: lawyal-eks
-      ECR_REPOSITORY: lawyal/flask-app
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::518394500999:role/GitHubActionsRole
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-
-      - name: Cleanup stale Terraform locks
+      - name: EKS: annihilate nodegroups (any state) & kill nodes
         run: |
-          echo "Checking for stale DynamoDB locks..."
-          LOCK_IDS=$(aws dynamodb scan \
-            --table-name terraform-locks \
-            --region $AWS_REGION \
-            --query "Items[].LockID.S" \
-            --output text || true)
-          for id in $LOCK_IDS; do
-            echo "⚡ Deleting stale lock: $id"
-            aws dynamodb delete-item \
-              --table-name terraform-locks \
-              --key "{\"LockID\":{\"S\":\"$id\"}}" \
-              --region $AWS_REGION || true
-          done
+          set -e
+          CLUSTER="$CLUSTER_NAME"
+          REGION="$AWS_REGION"
 
-      - name: Uninstall Helm releases
-        run: |
-          echo "⎈ Uninstalling Helm release flask-app..."
-          helm uninstall flask-app || true
-          kubectl delete svc flask-app --ignore-not-found || true
+          echo "🔎 Discovering nodegroups for $CLUSTER..."
+          NODEGROUPS="$(aws eks list-nodegroups --cluster-name "$CLUSTER" --region "$REGION" --query 'nodegroups[]' --output text || true)"
 
-      # 🔥 NEW: Pre-cleanup for EKS resources
-      - name: EKS Pre-Cleanup (EC2, Nodegroups, SGs, Cluster)
-        run: |
-          echo "🛑 Terminating stray EC2 instances from EKS..."
-          IDS=$(aws ec2 describe-instances --region $AWS_REGION \
-            --filters "Name=tag:aws:eks:cluster-name,Values=$CLUSTER_NAME" \
-            --query "Reservations[].Instances[].InstanceId" \
-            --output text || true)
-          if [ -n "$IDS" ]; then
-            aws ec2 terminate-instances --instance-ids $IDS --region $AWS_REGION || true
-            aws ec2 wait instance-terminated --instance-ids $IDS --region $AWS_REGION || true
-          fi
+          # Helper: get ASGs for a nodegroup via tagging API (most reliable)
+          get_asgs_for_ng() {
+            local ng="$1"
+            aws resourcegroupstaggingapi get-resources \
+              --region "$REGION" \
+              --tag-filters "Key=eks:cluster-name,Values=$CLUSTER" "Key=eks:nodegroup-name,Values=$ng" \
+              --resource-type-filters "autoscaling:autoScalingGroup" \
+              --query 'ResourceTagMappingList[].ResourceARN' --output text \
+            | sed 's#.*:autoScalingGroup/##g' || true
+          }
 
-          echo "🧹 Force deleting nodegroups..."
-          for ng in $(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION --query "nodegroups[]" --output text || true); do
-            echo "↘️ Scaling $ng to 0 (best-effort)..."
-            aws eks update-nodegroup-config --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION \
-              --scaling-config minSize=0,maxSize=0,desiredSize=0 || true
-            aws eks delete-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION --force || true
-            for i in {1..20}; do
-              STATUS=$(aws eks describe-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION --query "nodegroup.status" --output text 2>/dev/null || echo "MISSING")
-              echo "   → $ng: $STATUS"
-              [ "$STATUS" = "MISSING" ] && break
+          # Helper: terminate all instances in provided ASG names
+          kill_asg_instances() {
+            for A in "$@"; do
+              [ -z "$A" ] && continue
+              echo "🛑 Zeroing ASG $A"
+              aws autoscaling update-auto-scaling-group \
+                --auto-scaling-group-name "$A" \
+                --min-size 0 --max-size 0 --desired-capacity 0 \
+                --region "$REGION" || true
+
+              IDS="$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$A" --region "$REGION" \
+                   --query 'AutoScalingGroups[].Instances[].InstanceId' --output text || true)"
+              if [ -n "$IDS" ]; then
+                echo "🪓 Terminating instances in $A: $IDS"
+                aws ec2 terminate-instances --instance-ids $IDS --region "$REGION" || true
+                aws ec2 wait instance-terminated --instance-ids $IDS --region "$REGION" || true
+              fi
+            done
+          }
+
+          # Helper: force delete ASGs and try to delete their LaunchTemplates
+          delete_asgs_and_lts() {
+            for A in "$@"; do
+              [ -z "$A" ] && continue
+              echo "🧨 Force deleting ASG $A"
+              # Try to capture its LaunchTemplate before deletion
+              LT_ID="$(aws autoscaling describe-auto-scaling-groups \
+                 --auto-scaling-group-names "$A" --region "$REGION" \
+                 --query 'AutoScalingGroups[0].LaunchTemplate.LaunchTemplateId' --output text 2>/dev/null || echo '')"
+              aws autoscaling delete-auto-scaling-group --auto-scaling-group-name "$A" --force-delete --region "$REGION" || true
+              # Best-effort LT deletion (may fail if still referenced; that's fine)
+              if [ -n "$LT_ID" ] && [ "$LT_ID" != "None" ]; then
+                echo "🧹 Deleting Launch Template $LT_ID (best-effort)"
+                aws ec2 delete-launch-template --launch-template-id "$LT_ID" --region "$REGION" || true
+              fi
+            done
+          }
+
+          # 1) Handle all known nodegroups
+          for NG in $NODEGROUPS; do
+            echo "➡️  Working on nodegroup: $NG"
+
+            # Try a clean scale-to-zero first (valid values: maxSize must be >=1)
+            echo "↘️ Scaling $NG to 0 (min=0, desired=0, max=1)"
+            aws eks update-nodegroup-config \
+              --cluster-name "$CLUSTER" --nodegroup-name "$NG" --region "$REGION" \
+              --scaling-config minSize=0,maxSize=1,desiredSize=0 || true
+
+            # Grab ASGs via tagging (and, if missing, from EKS API)
+            ASGS="$(get_asgs_for_ng "$NG")"
+            if [ -z "$ASGS" ]; then
+              ASGS="$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NG" --region "$REGION" \
+                      --query 'nodegroup.resources.autoScalingGroups[].name' --output text 2>/dev/null || true)"
+            fi
+            echo "🔗 Backing ASGs for $NG: ${ASGS:-<none>}"
+
+            # Kill any instances, then try standard NG delete
+            [ -n "$ASGS" ] && kill_asg_instances $ASGS
+
+            echo "🧹 Deleting nodegroup $NG (standard delete)..."
+            aws eks delete-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NG" --region "$REGION" || true
+
+            # Poll status; if DELETE_FAILED or still present, nuke ASGs and retry
+            for i in {1..30}; do
+              STATUS="$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NG" --region "$REGION" \
+                        --query 'nodegroup.status' --output text 2>/dev/null || echo 'MISSING')"
+              echo "   → $NG status: $STATUS"
+              if [ "$STATUS" = "MISSING" ]; then
+                break
+              fi
+              if [ "$STATUS" = "DELETE_FAILED" ] || [ $i -eq 10 ]; then
+                echo "⚠️  $NG not deleting cleanly, FORCE-removing backing ASGs..."
+                [ -n "$ASGS" ] && delete_asgs_and_lts $ASGS
+                # Retry delete
+                aws eks delete-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NG" --region "$REGION" || true
+              fi
               sleep 15
             done
           done
 
-          echo "🧹 Cleaning orphaned ENIs and SGs..."
-          ENIS=$(aws ec2 describe-network-interfaces --region $AWS_REGION \
-            --filters "Name=description,Values=amazon-eks*,ELB * ,*k8s*" \
-            --query 'NetworkInterfaces[].NetworkInterfaceId' --output text || true)
-          for eni in $ENIS; do
-            ATTACH_ID=$(aws ec2 describe-network-interfaces --network-interface-ids $eni --region $AWS_REGION \
-              --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text 2>/dev/null || echo "")
-            if [ "$ATTACH_ID" != "None" ] && [ -n "$ATTACH_ID" ]; then
-              aws ec2 detach-network-interface --attachment-id "$ATTACH_ID" --region $AWS_REGION || true
-              sleep 5
-            fi
-            aws ec2 delete-network-interface --network-interface-id $eni --region $AWS_REGION || true
-          done
+          # 2) Kill any remaining EC2 nodes that belong to this cluster (catch-all)
+          echo "🧹 Catch-all: terminating stray EC2 nodes for $CLUSTER..."
+          CATCH_IDS="$(aws ec2 describe-instances --region "$REGION" \
+            --filters "Name=tag:aws:eks:cluster-name,Values=$CLUSTER" \
+                      "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+            --query 'Reservations[].Instances[].InstanceId' --output text || true)"
+          # Also try common Kubernetes tag (some AMIs add it)
+          if [ -z "$CATCH_IDS" ]; then
+            CATCH_IDS="$(aws ec2 describe-instances --region "$REGION" \
+              --filters "Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned,shared" \
+                        "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+              --query 'Reservations[].Instances[].InstanceId' --output text || true)"
+          fi
+          if [ -n "$CATCH_IDS" ]; then
+            echo "🪓 Terminating stray instances: $CATCH_IDS"
+            aws ec2 terminate-instances --instance-ids $CATCH_IDS --region "$REGION" || true
+            aws ec2 wait instance-terminated --instance-ids $CATCH_IDS --region "$REGION" || true
+          else
+            echo "✅ No stray instances found."
+          fi
 
-          SGIDS=$(aws ec2 describe-security-groups --region $AWS_REGION \
-            --filters "Name=group-name,Values=eks-cluster-sg-*" \
-            --query "SecurityGroups[].GroupId" --output text || true)
-          for sg in $SGIDS; do
-            echo "🧹 Deleting EKS SG $sg"
-            aws ec2 delete-security-group --group-id $sg --region $AWS_REGION || true
-          done
+          # 3) As a last check, if any nodegroups still exist, try one final delete
+          REMAIN="$(aws eks list-nodegroups --cluster-name "$CLUSTER" --region "$REGION" --query 'nodegroups[]' --output text || true)"
+          if [ -n "$REMAIN" ]; then
+            echo "♻️ Final delete attempt for remaining nodegroups: $REMAIN"
+            for NG in $REMAIN; do
+              aws eks delete-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NG" --region "$REGION" || true
+            done
+            # brief poll
+            for NG in $REMAIN; do
+              for i in {1..20}; do
+                STATUS="$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NG" --region "$REGION" \
+                          --query 'nodegroup.status' --output text 2>/dev/null || echo 'MISSING')"
+                echo "   → $NG status: $STATUS"
+                [ "$STATUS" = "MISSING" ] && break
+                sleep 10
+              done
+            done
+          fi
 
-          echo "🧹 Deleting EKS Cluster..."
-          aws eks delete-cluster --name $CLUSTER_NAME --region $AWS_REGION || true
-          for i in {1..30}; do
-            STATUS=$(aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION --query "cluster.status" --output text 2>/dev/null || echo "MISSING")
-            echo "   → cluster: $STATUS"
-            [ "$STATUS" = "MISSING" ] && break
-            sleep 20
-          done
-
-      # (Existing step, still kept for redundancy if pre-cleanup missed something)
-      - name: Delete EKS Nodegroups & Cluster
-        run: |
-          echo "🧹 Deleting EKS Nodegroups..."
-          for ng in $(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION --query "nodegroups[]" --output text || true); do
-            aws eks delete-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
-            aws eks wait nodegroup-deleted --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
-          done
-          echo "🧹 Deleting EKS Cluster..."
-          aws eks delete-cluster --name $CLUSTER_NAME --region $AWS_REGION || true
-          aws eks wait cluster-deleted --name $CLUSTER_NAME --region $AWS_REGION || true
-
-      - name: Purge ECR repository
-        run: |
-          echo "🧹 Purging ECR images..."
-          aws ecr list-images --repository-name $ECR_REPOSITORY --region $AWS_REGION --query 'imageIds[*]' --output json | \
-          jq -c '.[]' | while read img; do
-            aws ecr batch-delete-image --repository-name $ECR_REPOSITORY --region $AWS_REGION --image-ids "$img" || true
-          done
-          aws ecr delete-repository --repository-name $ECR_REPOSITORY --region $AWS_REGION --force || true
-
-      - name: Terraform Init
-        run: terraform init -reconfigure
-
-      - name: Terraform Destroy
-        run: terraform destroy -auto-approve -parallelism=1 || true
-
-      - name: Force cleanup NATs, EIPs, routes, IGWs, ENIs, SGs, Subnets, VPCs
-        run: |
-          echo "🧹 Cleaning NAT Gateways..."
-          for nat in $(aws ec2 describe-nat-gateways --region $AWS_REGION --query "NatGateways[].NatGatewayId" --output text); do
-            aws ec2 delete-nat-gateway --nat-gateway-id $nat --region $AWS_REGION || true
-          done
-          echo "🧹 Releasing Elastic IPs..."
-          for eip in $(aws ec2 describe-addresses --region $AWS_REGION --query "Addresses[].AllocationId" --output text); do
-            aws ec2 release-address --allocation-id $eip --region $AWS_REGION || true
-          done
-          echo "🧹 Deleting Route Tables..."
-          for rtb in $(aws ec2 describe-route-tables --region $AWS_REGION --query "RouteTables[].RouteTableId" --output text); do
-            aws ec2 delete-route-table --route-table-id $rtb --region $AWS_REGION || true
-          done
-          echo "🧹 Detaching & Deleting IGWs..."
-          for igw in $(aws ec2 describe-internet-gateways --region $AWS_REGION --query "InternetGateways[].InternetGatewayId" --output text); do
-            VPC_ID=$(aws ec2 describe-internet-gateways --internet-gateway-ids $igw --region $AWS_REGION --query "InternetGateways[].Attachments[].VpcId" --output text)
-            if [ -n "$VPC_ID" ]; then
-              aws ec2 detach-internet-gateway --internet-gateway-id $igw --vpc-id $VPC_ID --region $AWS_REGION || true
-            fi
-            aws ec2 delete-internet-gateway --internet-gateway-id $igw --region $AWS_REGION || true
-          done
-          echo "🧹 Cleaning ENIs..."
-          for eni in $(aws ec2 describe-network-interfaces --region $AWS_REGION --query "NetworkInterfaces[].NetworkInterfaceId" --output text); do
-            aws ec2 delete-network-interface --network-interface-id $eni --region $AWS_REGION || true
-          done
-          echo "🧹 Deleting Security Groups..."
-          for sg in $(aws ec2 describe-security-groups --region $AWS_REGION --query "SecurityGroups[?GroupName!='default'].GroupId" --output text); do
-            aws ec2 delete-security-group --group-id $sg --region $AWS_REGION || true
-          done
-          echo "🧹 Deleting Subnets..."
-          for subnet in $(aws ec2 describe-subnets --region $AWS_REGION --query "Subnets[].SubnetId" --output text); do
-            aws ec2 delete-subnet --subnet-id $subnet --region $AWS_REGION || true
-          done
-          echo "🧹 Deleting VPCs..."
-          for vpc in $(aws ec2 describe-vpcs --region $AWS_REGION --query "Vpcs[].VpcId" --output text); do
-            aws ec2 delete-vpc --vpc-id $vpc --region $AWS_REGION || true
-          done
+          echo "✅ Nodegroups and nodes removed (or detached) — safe to delete cluster next."
