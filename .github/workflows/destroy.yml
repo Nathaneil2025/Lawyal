@@ -1,84 +1,15 @@
-name: Destroy Infrastructure
-
-on:
-  workflow_dispatch:
-
-permissions:
-  id-token: write
-  contents: read
-
-jobs:
-  destroy:
-    runs-on: ubuntu-latest
-    env:
-      AWS_REGION: eu-central-1
-      ECR_REPOSITORY: lawyal/flask-app
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::518394500999:role/GitHubActionsRole
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-
-      - name: Cleanup stale Terraform locks
+      - name: Delete EKS Nodegroups (if any)
         run: |
-          LOCK_IDS=$(aws dynamodb scan --table-name terraform-locks --region $AWS_REGION --query "Items[].LockID.S" --output text || true)
-          for id in $LOCK_IDS; do
-            aws dynamodb delete-item --table-name terraform-locks --key "{\"LockID\":{\"S\":\"$id\"}}" --region $AWS_REGION || true
-          done
-
-      - name: Try updating kubeconfig (ignore if cluster gone)
-        run: aws eks update-kubeconfig --region $AWS_REGION --name lawyal-eks || true
-
-      - name: Uninstall Helm releases
-        run: helm uninstall flask-app || true
-
-      - name: Delete all Kubernetes Services (so ELBs + ENIs go)
-        run: kubectl delete svc --all --ignore-not-found || true
-
-      - name: Purge ECR images (don’t delete repo, Terraform owns it)
-        run: |
-          IMAGES=$(aws ecr list-images --repository-name $ECR_REPOSITORY --region $AWS_REGION --query 'imageIds[*]' --output json || echo "[]")
-          if [ "$IMAGES" != "[]" ]; then
-            aws ecr batch-delete-image --repository-name $ECR_REPOSITORY --region $AWS_REGION --image-ids "$IMAGES" || true
+          CLUSTER_NAME=lawyal-eks
+          echo "Checking nodegroups for cluster: $CLUSTER_NAME"
+          NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION --query "nodegroups[]" --output text || echo "")
+          if [ -n "$NODEGROUPS" ]; then
+            for ng in $NODEGROUPS; do
+              echo "⚡ Deleting nodegroup: $ng"
+              aws eks delete-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
+              echo "⏳ Waiting for $ng to delete..."
+              aws eks wait nodegroup-deleted --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
+            done
+          else
+            echo "✅ No nodegroups found."
           fi
-
-      - name: Terraform Init
-        run: terraform init
-
-      - name: Terraform Destroy
-        run: terraform destroy -auto-approve -parallelism=1 || true
-
-      - name: Force cleanup stragglers (ENIs, SGs, IGWs, Subnets, VPCs)
-        run: |
-          echo "Cleaning up stray ENIs..."
-          aws ec2 describe-network-interfaces --region $AWS_REGION --query "NetworkInterfaces[].NetworkInterfaceId" --output text | \
-          xargs -r -n1 aws ec2 delete-network-interface --network-interface-id || true
-
-          echo "Cleaning up stray Security Groups..."
-          aws ec2 describe-security-groups --region $AWS_REGION --query "SecurityGroups[?GroupName!='default'].GroupId" --output text | \
-          xargs -r -n1 aws ec2 delete-security-group --group-id || true
-
-          echo "Cleaning up stray Internet Gateways..."
-          for igw in $(aws ec2 describe-internet-gateways --region $AWS_REGION --query "InternetGateways[].InternetGatewayId" --output text); do
-            VPC_ID=$(aws ec2 describe-internet-gateways --internet-gateway-ids $igw --region $AWS_REGION --query "InternetGateways[].Attachments[].VpcId" --output text)
-            if [ -n "$VPC_ID" ]; then
-              aws ec2 detach-internet-gateway --internet-gateway-id $igw --vpc-id $VPC_ID || true
-            fi
-            aws ec2 delete-internet-gateway --internet-gateway-id $igw || true
-          done
-
-          echo "Cleaning up stray Subnets..."
-          aws ec2 describe-subnets --region $AWS_REGION --query "Subnets[].SubnetId" --output text | \
-          xargs -r -n1 aws ec2 delete-subnet --subnet-id || true
-
-          echo "Cleaning up stray VPCs..."
-          aws ec2 describe-vpcs --region $AWS_REGION --query "Vpcs[].VpcId" --output text | \
-          xargs -r -n1 aws ec2 delete-vpc --vpc-id || true
