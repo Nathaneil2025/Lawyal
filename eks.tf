@@ -10,6 +10,10 @@ resource "aws_eks_cluster" "cluster" {
   }
 
   depends_on = [
+    aws_vpc.main,                                 # ✅ Wait for VPC
+    aws_subnet.public,                            # ✅ Wait for public subnet
+    aws_subnet.private,                           # ✅ Wait for private subnet
+    aws_internet_gateway.igw,                     # ✅ Ensure IGW exists
     aws_iam_role_policy_attachment.eks_cluster_AmazonEKSClusterPolicy,
     aws_iam_role_policy_attachment.eks_cluster_VPCResourceController
   ]
@@ -50,7 +54,7 @@ resource "aws_eks_node_group" "public_ng" {
   }
 
   depends_on = [
-    aws_eks_cluster.cluster,  # ✅ Wait for control plane
+    aws_eks_cluster.cluster,                      # ✅ Wait for cluster
     aws_security_group_rule.controlplane_to_nodes_ephemeral,
     aws_security_group_rule.controlplane_to_nodes_https
   ]
@@ -85,7 +89,7 @@ resource "aws_eks_node_group" "private_ng" {
   }
 
   depends_on = [
-    aws_eks_cluster.cluster,  # ✅ Wait for control plane
+    aws_eks_cluster.cluster,                      # ✅ Wait for cluster
     aws_security_group_rule.controlplane_to_nodes_ephemeral,
     aws_security_group_rule.controlplane_to_nodes_https
   ]
