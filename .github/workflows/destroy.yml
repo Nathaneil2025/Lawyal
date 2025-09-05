@@ -53,8 +53,22 @@ jobs:
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION || true
 
-      # 1) Kube teardown: remove LB Services/Ingress/PVCs so cloud deps are released
-      - name: Kube: remove Helm/LB Services/Ingress/PVCs
+           - name: Kube: remove Helm/LB Services/Ingress/PVCs
+        run: |
+          set -e
+          kubectl config current-context || true
+
+          # Uninstall your app(s)
+          helm uninstall flask-app || true
+
+          # Delete Services of type LoadBalancer (they create ALB/NLB + SGs)
+          kubectl get svc -A -o json | \
+            jq -r '.items[] | select(.spec.type=="LoadBalancer") | [.metadata.namespace,.metadata.name] | @tsv' | \
+            while IFS=$'\t' read -r ns name; do
+              echo "Deleting LB Service $ns/$name"
+              kubectl delete svc -n "$ns" "$name" --wait=false || true
+            done
+
         run: |
           set -e
           kubectl config current-context || true
