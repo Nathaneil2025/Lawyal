@@ -48,14 +48,16 @@ resource "aws_subnet" "private" {
 }
 
 # Elastic IP for NAT Gateway
+# Elastic IP for NAT Gateway
 resource "aws_eip" "nat" {
-  vpc = true
+  domain = "vpc"   # ✅ replaces deprecated 'vpc = true'
 
   tags = {
     Name    = "${var.project_name}-nat-eip"
     Project = var.project_name
   }
 }
+
 
 # NAT Gateway in public subnet
 resource "aws_nat_gateway" "nat" {
