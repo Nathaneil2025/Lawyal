@@ -1,7 +1,7 @@
 name: Destroy Infrastructure
 
 on:
-  workflow_dispatch:   # manual trigger only
+  workflow_dispatch:   # 👈 manual trigger only
 
 permissions:
   id-token: write
@@ -102,8 +102,8 @@ jobs:
           done
 
           echo "🧹 Deleting ENIs..."
-          for eni in $(aws ec2 describe-network-interfaces --region $AWS_REGION --query 'NetworkInterfaces[].NetworkInterfaceId' --output text || true); do
-            ATTACH_ID=$(aws ec2 describe-network-interfaces --network-interface-ids $eni --region $AWS_REGION --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text || echo "")
+          for eni in $(aws ec2 describe-network-interfaces --region $AWS_REGION --query "NetworkInterfaces[].NetworkInterfaceId" --output text || true); do
+            ATTACH_ID=$(aws ec2 describe-network-interfaces --network-interface-ids $eni --region $AWS_REGION --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text 2>/dev/null || echo "")
             if [ "$ATTACH_ID" != "None" ] && [ -n "$ATTACH_ID" ]; then
               aws ec2 detach-network-interface --attachment-id $ATTACH_ID --region $AWS_REGION || true
               sleep 5
