@@ -1,58 +1,82 @@
-# EKS Cluster Role
-resource "aws_iam_role" "eks_cluster_role" {
-  name = "${var.project_name}-eks-cluster-role"
+data "aws_caller_identity" "current" {}
 
-  assume_role_policy = data.aws_iam_policy_document.eks_assume_role.json
+resource "aws_iam_role" "github_actions_role" {
+  name = "GitHubActionsRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect = "Allow",
+      Principal = {
+        Federated = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"
+      },
+      Action = "sts:AssumeRoleWithWebIdentity",
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com",
+          # Restrict to your repo
+          "token.actions.githubusercontent.com:sub" = "repo:Nathaneil2025/Lawyal:ref:refs/heads/main"
+        }
+      }
+    }]
+  })
 }
 
-data "aws_iam_policy_document" "eks_assume_role" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["eks.amazonaws.com"]
-    }
-  }
-}
+resource "aws_iam_role_policy" "github_actions_destroy" {
+  name = "GitHubActionsDestroyPolicy"
+  role = aws_iam_role.github_actions_role.id
 
-resource "aws_iam_role_policy_attachment" "eks_cluster_AmazonEKSClusterPolicy" {
-  role       = aws_iam_role.eks_cluster_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
-}
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          # EKS
+          "eks:DeleteCluster",
+          "eks:DescribeCluster",
+          "eks:ListNodegroups",
+          "eks:DeleteNodegroup",
+          "eks:DescribeNodegroup",
+          "eks:UpdateNodegroupConfig",
 
-resource "aws_iam_role_policy_attachment" "eks_cluster_VPCResourceController" {
-  role       = aws_iam_role.eks_cluster_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSVPCResourceController"
-}
+          # Auto Scaling (for backing ASGs of nodegroups)
+          "autoscaling:DeleteAutoScalingGroup",
+          "autoscaling:DescribeAutoScalingGroups",
 
-# Node Group Role
-resource "aws_iam_role" "eks_node_role" {
-  name = "${var.project_name}-eks-node-role"
+          # EC2
+          "ec2:TerminateInstances",
+          "ec2:DescribeInstances",
+          "ec2:DeleteNetworkInterface",
+          "ec2:DetachNetworkInterface",
+          "ec2:DeleteSecurityGroup",
+          "ec2:DeleteSubnet",
+          "ec2:DeleteVpc",
+          "ec2:DeleteNatGateway",
+          "ec2:ReleaseAddress",
+          "ec2:DeleteRouteTable",
+          "ec2:DetachInternetGateway",
+          "ec2:DeleteInternetGateway",
+          "ec2:Describe*",
 
-  assume_role_policy = data.aws_iam_policy_document.nodes_assume_role.json
-}
+          # ELB
+          "elasticloadbalancing:DeleteLoadBalancer",
+          "elasticloadbalancing:DescribeLoadBalancers",
+          "elasticloadbalancing:DeleteTargetGroup",
+          "elasticloadbalancing:DescribeTargetGroups",
 
-data "aws_iam_policy_document" "nodes_assume_role" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["ec2.amazonaws.com"]
-    }
-  }
-}
+          # ECR
+          "ecr:BatchDeleteImage",
+          "ecr:DeleteRepository",
+          "ecr:ListImages",
+          "ecr:DescribeRepositories",
 
-resource "aws_iam_role_policy_attachment" "node_AmazonEKSWorkerNodePolicy" {
-  role       = aws_iam_role.eks_node_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
-}
-
-resource "aws_iam_role_policy_attachment" "node_AmazonEC2ContainerRegistryReadOnly" {
-  role       = aws_iam_role.eks_node_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-}
-
-resource "aws_iam_role_policy_attachment" "node_AmazonEKS_CNI_Policy" {
-  role       = aws_iam_role.eks_node_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+          # DynamoDB (for TF state locks)
+          "dynamodb:DeleteItem",
+          "dynamodb:Scan"
+        ],
+        Resource = "*"
+      }
+    ]
+  })
 }
