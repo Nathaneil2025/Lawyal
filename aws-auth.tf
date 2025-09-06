@@ -1,8 +1,7 @@
-
+# Get current AWS account details
+data "aws_caller_identity" "current" {}
 
 resource "kubernetes_config_map" "aws_auth" {
-  provider = kubernetes  # 👈 explicitly tell TF to use the Kubernetes provider
-
   metadata {
     name      = "aws-auth"
     namespace = "kube-system"
@@ -11,13 +10,13 @@ resource "kubernetes_config_map" "aws_auth" {
   data = {
     mapRoles = jsonencode([
       {
-        # Worker nodes → required for nodes to join
+        # Worker nodes
         rolearn  = aws_iam_role.eks_node_role.arn
         username = "system:node:{{EC2PrivateDNSName}}"
         groups   = ["system:bootstrappers", "system:nodes"]
       },
       {
-        # GitHub Actions role → cluster admin (CI/CD)
+        # GitHub Actions role (if you need CI/CD later)
         rolearn  = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/GitHubActionsRole"
         username = "github-runner"
         groups   = ["system:masters"]
@@ -26,7 +25,6 @@ resource "kubernetes_config_map" "aws_auth" {
 
     mapUsers = jsonencode([
       {
-        # Your IAM user → cluster admin
         userarn  = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/Nateuser"
         username = "nate"
         groups   = ["system:masters"]
@@ -34,12 +32,10 @@ resource "kubernetes_config_map" "aws_auth" {
     ])
   }
 
-  depends_on = [
-    aws_eks_cluster.cluster
-  ]
+  depends_on = [aws_eks_cluster.cluster]
 
   lifecycle {
-    # Avoid recreate loops (aws-auth usually exists already)
+    # Prevent "already exists" error by letting TF adopt the resource
     create_before_destroy = true
     ignore_changes        = [metadata]
   }
