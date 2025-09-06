@@ -28,7 +28,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-      # 1) Destroy Helm workloads
+    # 1) Destroy Helm workloads
       - name: Kube cleanup workloads
         run: |
           set -e
@@ -43,3 +43,84 @@ jobs:
           | while IFS=$'\t' read -r ns name; do
               kubectl delete svc -n "$ns" "$name" --wait=false || true
             done
+
+          echo "🧹 Deleting PVCs..."
+          kubectl get pvc -A --no-headers 2>/dev/null \
+          | awk '{print $1,$2}' \
+          | while read ns name; do
+              kubectl delete pvc -n "$ns" "$name" --wait=false || true
+            done
+
+      # 2) Terminate EC2 worker nodes
+      - name: Terminate EC2 nodes
+        run: |
+          echo "🛑 Terminating EC2 worker nodes..."
+          IDS=$(aws ec2 describe-instances --region $AWS_REGION \
+            --filters "Name=tag:aws:eks:cluster-name,Values=$CLUSTER_NAME" \
+            --query "Reservations[].Instances[].InstanceId" --output text || true)
+          if [ -n "$IDS" ]; then
+            aws ec2 terminate-instances --instance-ids $IDS --region $AWS_REGION || true
+            aws ec2 wait instance-terminated --instance-ids $IDS --region $AWS_REGION || true
+          fi
+
+      # 3) Delete Nodegroups
+      - name: Delete Nodegroups
+        run: |
+          echo "🧹 Deleting EKS nodegroups..."
+          for ng in $(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION --query "nodegroups[]" --output text || true); do
+            aws eks delete-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
+            aws eks wait nodegroup-deleted --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
+          done
+          # 4) Delete Cluster
+      - name: Delete EKS cluster
+        run: |
+          echo "🧹 Deleting EKS cluster..."
+          aws eks delete-cluster --name $CLUSTER_NAME --region $AWS_REGION || true
+          aws eks wait cluster-deleted --name $CLUSTER_NAME --region $AWS_REGION || true
+
+      # 5) Delete Load Balancers
+      - name: Delete Load Balancers
+        run: |
+          echo "🧹 Deleting ELB/ALBs..."
+          LBS=$(aws elbv2 describe-load-balancers --region $AWS_REGION --query 'LoadBalancers[].LoadBalancerArn' --output text || true)
+          for lb in $LBS; do
+            aws elbv2 delete-load-balancer --load-balancer-arn $lb --region $AWS_REGION || true
+          done
+
+          CLB_NAMES=$(aws elb describe-load-balancers --region $AWS_REGION --query 'LoadBalancerDescriptions[].LoadBalancerName' --output text 2>/dev/null || true)
+          for name in $CLB_NAMES; do
+            aws elb delete-load-balancer --load-balancer-name $name --region $AWS_REGION || true
+          done
+
+      # 6) Delete Security Groups
+      - name: Delete Security Groups
+        run: |
+          echo "🧹 Deleting Security Groups..."
+          for sg in $(aws ec2 describe-security-groups --region $AWS_REGION \
+            --query "SecurityGroups[?GroupName!='default'].GroupId" --output text || true); do
+            aws ec2 delete-security-group --group-id $sg --region $AWS_REGION || true
+          done
+
+      # 7) Delete ENIs
+      - name: Delete ENIs
+        run: |
+          echo "🧹 Cleaning orphaned ENIs..."
+          ENIS=$(aws ec2 describe-network-interfaces --region $AWS_REGION \
+            --filters "Name=description,Values=amazon-eks*,ELB * ,*k8s*" \
+            --query 'NetworkInterfaces[].NetworkInterfaceId' --output text || true)
+          for eni in $ENIS; do
+            ATTACH_ID=$(aws ec2 describe-network-interfaces --network-interface-ids $eni --region $AWS_REGION \
+              --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text 2>/dev/null || echo "")
+            if [ "$ATTACH_ID" != "None" ] && [ -n "$ATTACH_ID" ]; then
+              aws ec2 detach-network-interface --attachment-id "$ATTACH_ID" --region $AWS_REGION || true
+              sleep 5
+            fi
+            aws ec2 delete-network-interface --network-interface-id $eni --region $AWS_REGION || true
+          done
+
+      # 8) Terraform destroy + VPC cleanup
+      - name: Terraform Init
+        run: terraform init -reconfigure
+
+      - name: Terraform Destroy
+        run: terraform destroy -auto-approve -parallelism=1 || true
