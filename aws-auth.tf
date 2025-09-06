@@ -1,4 +1,4 @@
-data "aws_caller_identity" "current" {}
+
 
 resource "kubernetes_config_map" "aws_auth" {
   provider = kubernetes  # 👈 explicitly tell TF to use the Kubernetes provider
