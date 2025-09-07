@@ -44,7 +44,7 @@ jobs:
           VERSION_TAG="latest-v$NEXT_VERSION"
           echo "➡️ Using version tag: $VERSION_TAG"
 
-          # Export VERSION_TAG to GitHub output
+          # Export VERSION_TAG for later steps
           echo "version_tag=$VERSION_TAG" >> $GITHUB_OUTPUT
 
           # Build the image
