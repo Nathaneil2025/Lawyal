@@ -1,14 +1,14 @@
 name: Deploy Infrastructure
 
 on:
-  workflow_dispatch:   # manual trigger, or you can use push to main if preferred
+  workflow_dispatch:   # manual trigger only
 
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  deploy:
+  infra:
     runs-on: ubuntu-latest
     env:
       AWS_REGION: eu-central-1
@@ -27,32 +27,28 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-      - name: Cleanup stale Terraform locks
-        run: |
-          aws dynamodb scan --table-name terraform-locks --region $AWS_REGION \
-            --query "Items[].LockID.S" --output text | \
-            xargs -r -I {} aws dynamodb delete-item \
-              --table-name terraform-locks \
-              --key "{\"LockID\":{\"S\":\"{}\"}}" \
-              --region $AWS_REGION
-
       - name: Terraform Init
         run: terraform init -reconfigure
 
-      - name: Terraform Apply
+      - name: Terraform Apply (Infra)
         run: terraform apply -auto-approve
 
-      # Wait until cluster is fully active
-      - name: Wait for EKS cluster
-        run: |
-          echo "⏳ Waiting for cluster to be ACTIVE..."
-          aws eks wait cluster-active --name $CLUSTER_NAME --region $AWS_REGION
-          echo "✅ Cluster is ACTIVE."
-
-      - name: Update kubeconfig
+      # ✅ Ensure kubeconfig is always updated for kubectl/helm
+      - name: Update kubeconfig for EKS
         run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
 
-      # Apply aws-auth.yaml for role/user/node mappings
       - name: Apply aws-auth ConfigMap
         run: |
+          echo "⏳ Applying aws-auth ConfigMap..."
+          terraform output -raw aws_auth_manifest > aws-auth.yaml
           kubectl apply -f aws-auth.yaml
+          echo "✅ aws-auth applied."
+
+      - name: Wait for Nodegroups
+        run: |
+          echo "⏳ Waiting for nodegroups to become ACTIVE..."
+          for ng in $(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION --query "nodegroups[]" --output text); do
+            echo "→ Waiting for $ng..."
+            aws eks wait nodegroup-active --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION
+            echo "✅ Nodegroup $ng is ACTIVE."
+          done
