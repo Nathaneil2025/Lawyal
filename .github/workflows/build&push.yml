@@ -1,23 +1,51 @@
+name: Docker Build & Push
+
+on:
+  workflow_dispatch:   # manual trigger only
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: eu-central-1
+      ECR_REGISTRY: 518394500999.dkr.ecr.eu-central-1.amazonaws.com
+      ECR_REPOSITORY: lawyal/flask-app
+      IMAGE_TAG: sha-${{ github.sha }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::518394500999:role/GitHubActionsRole
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Build & Push Docker image
+        id: buildpush
         run: |
           echo "🐳 Building Docker image..."
-
           # Find latest version number in ECR
           LAST_VERSION=$(aws ecr list-images \
             --repository-name $ECR_REPOSITORY \
             --region $AWS_REGION \
             --query 'imageIds[].imageTag' \
             --output text | grep '^latest-v' | sed 's/latest-v//' | sort -n | tail -1)
-
           if [ -z "$LAST_VERSION" ]; then
             NEXT_VERSION=1
           else
             NEXT_VERSION=$((LAST_VERSION + 1))
           fi
-
           VERSION_TAG="latest-v$NEXT_VERSION"
-
           echo "➡️ Using version tag: $VERSION_TAG"
+
+          # Export VERSION_TAG to GitHub output
+          echo "version_tag=$VERSION_TAG" >> $GITHUB_OUTPUT
 
           # Build the image
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./app
@@ -29,3 +57,6 @@
           echo "📦 Pushing images to ECR..."
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$VERSION_TAG
+
+      - name: Show Pushed Image Tag
+        run: echo "✅ Pushed image tag: ${{ steps.buildpush.outputs.version_tag }}"
