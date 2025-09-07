@@ -57,6 +57,3 @@ jobs:
           echo "📦 Pushing images to ECR..."
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$VERSION_TAG
-
-      - name: Show Pushed Image Tag
-        run: echo "✅ Pushed image tag: ${{ steps.buildpush.outputs.version_tag }}"
