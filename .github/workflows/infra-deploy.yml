@@ -1,0 +1,58 @@
+name: Deploy Infrastructure
+
+on:
+  workflow_dispatch:   # manual trigger, or you can use push to main if preferred
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: eu-central-1
+      CLUSTER_NAME: lawyal-eks
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::518394500999:role/GitHubActionsRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Cleanup stale Terraform locks
+        run: |
+          aws dynamodb scan --table-name terraform-locks --region $AWS_REGION \
+            --query "Items[].LockID.S" --output text | \
+            xargs -r -I {} aws dynamodb delete-item \
+              --table-name terraform-locks \
+              --key "{\"LockID\":{\"S\":\"{}\"}}" \
+              --region $AWS_REGION
+
+      - name: Terraform Init
+        run: terraform init -reconfigure
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+
+      # Wait until cluster is fully active
+      - name: Wait for EKS cluster
+        run: |
+          echo "⏳ Waiting for cluster to be ACTIVE..."
+          aws eks wait cluster-active --name $CLUSTER_NAME --region $AWS_REGION
+          echo "✅ Cluster is ACTIVE."
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
+
+      # Apply aws-auth.yaml for role/user/node mappings
+      - name: Apply aws-auth ConfigMap
+        run: |
+          kubectl apply -f aws-auth.yaml
