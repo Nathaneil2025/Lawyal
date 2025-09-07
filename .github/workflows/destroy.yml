@@ -52,6 +52,7 @@ jobs:
             done
 
       # 2) Scale down nodegroups FIRST and suspend ASG launches so nothing respawns
+      # 2) Scale down nodegroups FIRST and suspend ASG launches so nothing respawns
       - name: Scale down nodegroups & suspend ASG launches
         run: |
           set -e
@@ -62,11 +63,11 @@ jobs:
           NODEGROUPS=$(aws eks list-nodegroups --cluster-name "$CLUSTER" --region "$REGION" --query "nodegroups[]" --output text 2>/dev/null || true)
 
           for NG in $NODEGROUPS; do
-            echo "↘️ Scaling $NG to 0 (min=0, desired=0, max=1)..."
+            echo "↘️ Scaling $NG to 0 (min=0, desired=0, max=0)..."
             aws eks update-nodegroup-config \
               --cluster-name "$CLUSTER" \
               --nodegroup-name "$NG" \
-              --scaling-config minSize=0,maxSize=1,desiredSize=0 \
+              --scaling-config minSize=0,maxSize=0,desiredSize=0 \
               --region "$REGION" || true
 
             echo "⏸ Suspending ASG launches for $NG..."
@@ -78,46 +79,29 @@ jobs:
               --output text 2>/dev/null || true)
 
             for A in $ASGS; do
-              # Prevent repopulation by Launch/ReplaceUnhealthy
               aws autoscaling suspend-processes \
                 --auto-scaling-group-name "$A" \
                 --scaling-processes Launch ReplaceUnhealthy \
                 --region "$REGION" || true
 
-              echo "⏳ Waiting for ASG $A to reach 0 desired/instances..."
-              # Best-effort shrink from ASG side as well
+              echo "⏳ Forcing ASG $A to 0 capacity..."
               aws autoscaling update-auto-scaling-group \
                 --auto-scaling-group-name "$A" \
-                --min-size 0 --max-size 1 --desired-capacity 0 \
+                --min-size 0 --max-size 0 --desired-capacity 0 \
                 --region "$REGION" || true
             done
           done
 
-          echo "⏳ Polling until no instances remain in these nodegroups..."
-          for i in {1..30}; do
-            COUNT=0
-            for NG in $NODEGROUPS; do
-              ASGS=$(aws eks describe-nodegroup \
-                --cluster-name "$CLUSTER" \
-                --nodegroup-name "$NG" \
-                --region "$REGION" \
-                --query "nodegroup.resources.autoScalingGroups[].name" \
-                --output text 2>/dev/null || true)
+          echo "🛑 Immediately terminating any leftover EC2 instances..."
+          IDS=$(aws ec2 describe-instances --region "$REGION" \
+            --filters "Name=tag:aws:eks:cluster-name,Values=$CLUSTER" \
+            --query "Reservations[].Instances[].InstanceId" \
+            --output text || true)
+          if [ -n "$IDS" ]; then
+            aws ec2 terminate-instances --instance-ids $IDS --region "$REGION" || true
+            aws ec2 wait instance-terminated --instance-ids $IDS --region "$REGION" || true
+          fi
 
-              for A in $ASGS; do
-                INST=$(aws autoscaling describe-auto-scaling-groups \
-                  --auto-scaling-group-names "$A" \
-                  --region "$REGION" \
-                  --query "AutoScalingGroups[0].Instances | length(@)" \
-                  --output text 2>/dev/null || echo 0)
-                COUNT=$((COUNT + INST))
-              done
-            done
-
-            echo "   → Remaining instances across nodegroups: $COUNT"
-            [ "$COUNT" -eq 0 ] && break
-            sleep 15
-          done
 
       # 3) Terminate any straggler EC2s (should be none after step 2)
       - name: Terminate EC2 nodes
