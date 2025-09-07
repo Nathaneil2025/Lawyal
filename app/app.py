@@ -4,7 +4,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Hello from Flask on AWS EKS 🚀"
+    return "Hello from Flask on AWS EKS 2 🚀"
 
 @app.route("/health")
 def health():
