@@ -28,14 +28,14 @@ jobs:
       - name: Build & Push Docker image
         run: |
           echo "🐳 Building Docker image..."
-          # Find latest vX version in ECR
+          # Find latest versionX tag in ECR
           LAST_VERSION=$(aws ecr list-images \
             --repository-name $ECR_REPOSITORY \
             --region $AWS_REGION \
             --query 'imageIds[].imageTag' \
             --output text \
-            | grep -E '^v[0-9]+$' \
-            | sed 's/v//' \
+            | grep -E '^version[0-9]+$' \
+            | sed 's/version//' \
             | sort -n \
             | tail -1)
 
@@ -45,7 +45,7 @@ jobs:
             NEXT_VERSION=$((LAST_VERSION + 1))
           fi
 
-          VERSION_TAG="v$NEXT_VERSION"
+          VERSION_TAG="version$NEXT_VERSION"
           echo "➡️ Using version tag: $VERSION_TAG"
 
           # Build image
