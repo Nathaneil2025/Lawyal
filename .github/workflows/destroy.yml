@@ -14,6 +14,7 @@ jobs:
       AWS_REGION: eu-central-1
       CLUSTER_NAME: lawyal-eks
       ECR_REPOSITORY: lawyal/flask-app
+      LOCK_TABLE: terraform-locks   # 👈 your DynamoDB lock table
 
     steps:
       - name: Checkout repository
@@ -142,17 +143,15 @@ jobs:
             aws ec2 delete-network-interface --network-interface-id "$ENI" --region "$AWS_REGION" || true
           done
 
-      # 7) Delete Security Groups (non-default + EKS cluster SGs)
+      # 7) Delete Security Groups (non-default + EKS SGs)
       - name: Delete Security Groups
         run: |
           echo "🧹 Deleting Security Groups..."
-          # Non-default SGs
           for sg in $(aws ec2 describe-security-groups --region "$AWS_REGION" --query "SecurityGroups[?GroupName!='default'].GroupId" --output text || true); do
             echo "   → Deleting SG $sg"
             aws ec2 delete-security-group --group-id "$sg" --region "$AWS_REGION" || true
           done
 
-          # Explicitly delete EKS cluster SGs
           CLUSTER_SGS=$(aws ec2 describe-security-groups --region "$AWS_REGION" --filters "Name=group-name,Values=eks-cluster-sg-*" --query "SecurityGroups[].GroupId" --output text || true)
           for sg in $CLUSTER_SGS; do
             echo "   → Deleting EKS cluster SG $sg"
@@ -168,7 +167,8 @@ jobs:
               aws ecr batch-delete-image --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" --image-ids "$img" || true
             done
           aws ecr delete-repository --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" --force || true
-    # 🧹 New step: Cleanup stale Terraform locks
+
+      # 9) Cleanup stale Terraform locks
       - name: Cleanup stale Terraform locks
         run: |
           echo "🔎 Checking for stale DynamoDB locks..."
@@ -186,7 +186,7 @@ jobs:
               --region "$AWS_REGION" || true
           done
 
-      # 9) Terraform destroy (VPC & rest)
+      # 10) Terraform destroy (VPC & rest)
       - name: Terraform Init
         run: terraform init -reconfigure
 
