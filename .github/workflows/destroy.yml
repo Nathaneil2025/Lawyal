@@ -168,6 +168,23 @@ jobs:
               aws ecr batch-delete-image --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" --image-ids "$img" || true
             done
           aws ecr delete-repository --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" --force || true
+    # 🧹 New step: Cleanup stale Terraform locks
+      - name: Cleanup stale Terraform locks
+        run: |
+          echo "🔎 Checking for stale DynamoDB locks..."
+          LOCK_IDS=$(aws dynamodb scan \
+            --table-name "$LOCK_TABLE" \
+            --region "$AWS_REGION" \
+            --query "Items[].LockID.S" \
+            --output text || true)
+
+          for id in $LOCK_IDS; do
+            echo "⚡ Deleting stale lock: $id"
+            aws dynamodb delete-item \
+              --table-name "$LOCK_TABLE" \
+              --key "{\"LockID\":{\"S\":\"$id\"}}" \
+              --region "$AWS_REGION" || true
+          done
 
       # 9) Terraform destroy (VPC & rest)
       - name: Terraform Init
