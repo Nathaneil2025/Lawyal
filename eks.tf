@@ -78,7 +78,7 @@ resource "aws_eks_node_group" "public_ng" {
 
   depends_on = [
     aws_eks_cluster.cluster,
-    kubernetes_config_map.aws_auth, # ✅ ensure IAM mapping exists
+    
     aws_security_group_rule.controlplane_to_nodes_ephemeral,
     aws_security_group_rule.controlplane_to_nodes_https,
     aws_iam_role_policy_attachment.eks_worker_AmazonEKSWorkerNodePolicy,
@@ -119,7 +119,7 @@ resource "aws_eks_node_group" "private_ng" {
 
   depends_on = [
     aws_eks_cluster.cluster,
-    kubernetes_config_map.aws_auth, # ✅ ensure IAM mapping exists
+    
     aws_security_group_rule.controlplane_to_nodes_ephemeral,
     aws_security_group_rule.controlplane_to_nodes_https,
     aws_iam_role_policy_attachment.eks_worker_AmazonEKSWorkerNodePolicy,
