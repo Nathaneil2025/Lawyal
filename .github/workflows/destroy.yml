@@ -1,7 +1,7 @@
 name: Destroy Infrastructure
 
 on:
-  workflow_dispatch:   # manual trigger only
+  workflow_dispatch:   # 👈 manual trigger only
 
 permissions:
   id-token: write
@@ -28,7 +28,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-    # 1) Destroy Helm workloads
+      # 1) Destroy Helm workloads
       - name: Kube cleanup workloads
         run: |
           set -e
@@ -63,20 +63,50 @@ jobs:
             aws ec2 wait instance-terminated --instance-ids $IDS --region $AWS_REGION || true
           fi
 
-      # 3) Delete Nodegroups
-      - name: Delete Nodegroups
+      
+       # 3) Scale down & Delete Nodegroups
+      - name: Scale down & Delete Nodegroups
         run: |
-          echo "🧹 Deleting EKS nodegroups..."
-          for ng in $(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION --query "nodegroups[]" --output text || true); do
-            aws eks delete-nodegroup --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
-            aws eks wait nodegroup-deleted --cluster-name $CLUSTER_NAME --nodegroup-name $ng --region $AWS_REGION || true
+          echo "🧹 Scaling down and deleting EKS nodegroups..."
+          NODEGROUPS=$(aws eks list-nodegroups --cluster-name $CLUSTER_NAME --region $AWS_REGION --query "nodegroups[]" --output text 2>/dev/null || true)
+
+          for ng in $NODEGROUPS; do
+            echo "↘️ Scaling $ng to 0..."
+            aws eks update-nodegroup-config \
+              --cluster-name $CLUSTER_NAME \
+              --nodegroup-name $ng \
+              --scaling-config minSize=0,maxSize=0,desiredSize=0 \
+              --region $AWS_REGION || true
+
+            echo "🧨 Deleting nodegroup $ng..."
+            aws eks delete-nodegroup \
+              --cluster-name $CLUSTER_NAME \
+              --nodegroup-name $ng \
+              --region $AWS_REGION || true
+
+            for i in {1..20}; do
+              STATUS=$(aws eks describe-nodegroup \
+                         --cluster-name $CLUSTER_NAME \
+                         --nodegroup-name $ng \
+                         --region $AWS_REGION \
+                         --query "nodegroup.status" --output text 2>/dev/null || echo "MISSING")
+              echo "   → $ng: $STATUS"
+              [ "$STATUS" = "MISSING" ] && break
+              sleep 15
+            done
           done
-          # 4) Delete Cluster
+
+
+      # 4) Delete Cluster (skip cleanly if not found)
       - name: Delete EKS cluster
         run: |
           echo "🧹 Deleting EKS cluster..."
-          aws eks delete-cluster --name $CLUSTER_NAME --region $AWS_REGION || true
-          aws eks wait cluster-deleted --name $CLUSTER_NAME --region $AWS_REGION || true
+          if aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION > /dev/null 2>&1; then
+            aws eks delete-cluster --name $CLUSTER_NAME --region $AWS_REGION || true
+            aws eks wait cluster-deleted --name $CLUSTER_NAME --region $AWS_REGION || true
+          else
+            echo "⚠️ Cluster $CLUSTER_NAME not found, skipping..."
+          fi
 
       # 5) Delete Load Balancers
       - name: Delete Load Balancers
@@ -112,7 +142,7 @@ jobs:
             ATTACH_ID=$(aws ec2 describe-network-interfaces --network-interface-ids $eni --region $AWS_REGION \
               --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text 2>/dev/null || echo "")
             if [ "$ATTACH_ID" != "None" ] && [ -n "$ATTACH_ID" ]; then
-              aws ec2 detach-network-interface --attachment-id "$ATTACH_ID" --region $AWS_REGION || true
+              aws ec2 detach-network-interface --attachment-id $ATTACH_ID --region $AWS_REGION || true
               sleep 5
             fi
             aws ec2 delete-network-interface --network-interface-id $eni --region $AWS_REGION || true
