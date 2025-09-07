@@ -28,7 +28,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-      # 1) Clean K8s workloads to free cloud deps
+      # 1) Clean K8s workloads
       - name: Kube cleanup workloads
         run: |
           set -e
@@ -51,19 +51,16 @@ jobs:
               kubectl delete pvc -n "$ns" "$name" --wait=false || true
             done
 
-      # 2) Scale down nodegroups FIRST and suspend ASG launches so nothing respawns
-      # 2) Scale down nodegroups FIRST and suspend ASG launches so nothing respawns
-      - name: Scale down nodegroups & suspend ASG launches
+      # 2) Scale down nodegroups & suspend ASGs
+      - name: Scale down nodegroups & suspend ASGs
         run: |
           set -e
           CLUSTER="$CLUSTER_NAME"
           REGION="$AWS_REGION"
 
-          echo "🔎 Fetching nodegroups..."
           NODEGROUPS=$(aws eks list-nodegroups --cluster-name "$CLUSTER" --region "$REGION" --query "nodegroups[]" --output text 2>/dev/null || true)
-
           for NG in $NODEGROUPS; do
-            echo "↘️ Scaling $NG to 0 (min=0, desired=0, max=0)..."
+            echo "↘️ Scaling $NG to 0..."
             aws eks update-nodegroup-config \
               --cluster-name "$CLUSTER" \
               --nodegroup-name "$NG" \
@@ -77,45 +74,20 @@ jobs:
               --region "$REGION" \
               --query "nodegroup.resources.autoScalingGroups[].name" \
               --output text 2>/dev/null || true)
-
             for A in $ASGS; do
-              aws autoscaling suspend-processes \
-                --auto-scaling-group-name "$A" \
-                --scaling-processes Launch ReplaceUnhealthy \
-                --region "$REGION" || true
-
-              echo "⏳ Forcing ASG $A to 0 capacity..."
-              aws autoscaling update-auto-scaling-group \
-                --auto-scaling-group-name "$A" \
-                --min-size 0 --max-size 0 --desired-capacity 0 \
-                --region "$REGION" || true
+              aws autoscaling suspend-processes --auto-scaling-group-name "$A" --scaling-processes Launch ReplaceUnhealthy --region "$REGION" || true
+              aws autoscaling update-auto-scaling-group --auto-scaling-group-name "$A" --min-size 0 --max-size 0 --desired-capacity 0 --region "$REGION" || true
             done
           done
 
-          echo "🛑 Immediately terminating any leftover EC2 instances..."
-          IDS=$(aws ec2 describe-instances --region "$REGION" \
-            --filters "Name=tag:aws:eks:cluster-name,Values=$CLUSTER" \
-            --query "Reservations[].Instances[].InstanceId" \
-            --output text || true)
+          echo "🛑 Terminating leftover EC2 instances..."
+          IDS=$(aws ec2 describe-instances --region "$REGION" --filters "Name=tag:aws:eks:cluster-name,Values=$CLUSTER" --query "Reservations[].Instances[].InstanceId" --output text || true)
           if [ -n "$IDS" ]; then
             aws ec2 terminate-instances --instance-ids $IDS --region "$REGION" || true
             aws ec2 wait instance-terminated --instance-ids $IDS --region "$REGION" || true
           fi
 
-
-      # 3) Terminate any straggler EC2s (should be none after step 2)
-      - name: Terminate EC2 nodes
-        run: |
-          echo "🛑 Terminating EC2 worker nodes (if any left)..."
-          IDS=$(aws ec2 describe-instances --region "$AWS_REGION" \
-            --filters "Name=tag:aws:eks:cluster-name,Values=$CLUSTER_NAME" \
-            --query "Reservations[].Instances[].InstanceId" --output text || true)
-          if [ -n "$IDS" ]; then
-            aws ec2 terminate-instances --instance-ids $IDS --region "$AWS_REGION" || true
-            aws ec2 wait instance-terminated --instance-ids $IDS --region "$AWS_REGION" || true
-          fi
-
-      # 4) Delete nodegroups
+      # 3) Delete nodegroups
       - name: Delete Nodegroups
         run: |
           echo "🧹 Deleting EKS nodegroups..."
@@ -130,7 +102,7 @@ jobs:
             done
           done
 
-      # 5) Delete Cluster (skip cleanly if not found)
+      # 4) Delete cluster
       - name: Delete EKS cluster
         run: |
           echo "🧹 Deleting EKS cluster..."
@@ -141,7 +113,7 @@ jobs:
             echo "⚠️ Cluster $CLUSTER_NAME not found, skipping..."
           fi
 
-      # 6) Delete Load Balancers (ALB/NLB/Classic)
+      # 5) Delete Load Balancers
       - name: Delete Load Balancers
         run: |
           echo "🧹 Deleting ALB/NLBs..."
@@ -156,25 +128,13 @@ jobs:
             aws elb delete-load-balancer --load-balancer-name "$name" --region "$AWS_REGION" || true
           done
 
-      # 7) Delete Security Groups (non-default)
-      - name: Delete Security Groups
-        run: |
-          echo "🧹 Deleting Security Groups..."
-          for sg in $(aws ec2 describe-security-groups --region "$AWS_REGION" \
-            --query "SecurityGroups[?GroupName!='default'].GroupId" --output text || true); do
-            aws ec2 delete-security-group --group-id "$sg" --region "$AWS_REGION" || true
-          done
-
-      # 8) Delete ENIs created by EKS/ELB
+      # 6) Delete ENIs
       - name: Delete ENIs
         run: |
           echo "🧹 Cleaning orphaned ENIs..."
-          ENIS=$(aws ec2 describe-network-interfaces --region "$AWS_REGION" \
-            --filters "Name=description,Values=amazon-eks*,ELB * ,*k8s*" \
-            --query 'NetworkInterfaces[].NetworkInterfaceId' --output text || true)
+          ENIS=$(aws ec2 describe-network-interfaces --region "$AWS_REGION" --filters "Name=description,Values=amazon-eks*,ELB * ,*k8s*" --query 'NetworkInterfaces[].NetworkInterfaceId' --output text || true)
           for ENI in $ENIS; do
-            ATTACH_ID=$(aws ec2 describe-network-interfaces --network-interface-ids "$ENI" --region "$AWS_REGION" \
-              --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text 2>/dev/null || echo "")
+            ATTACH_ID=$(aws ec2 describe-network-interfaces --network-interface-ids "$ENI" --region "$AWS_REGION" --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text 2>/dev/null || echo "")
             if [ "$ATTACH_ID" != "None" ] && [ -n "$ATTACH_ID" ]; then
               aws ec2 detach-network-interface --attachment-id "$ATTACH_ID" --region "$AWS_REGION" || true
               sleep 5
@@ -182,7 +142,24 @@ jobs:
             aws ec2 delete-network-interface --network-interface-id "$ENI" --region "$AWS_REGION" || true
           done
 
-      # 9) Purge ECR (optional)
+      # 7) Delete Security Groups (non-default + EKS cluster SGs)
+      - name: Delete Security Groups
+        run: |
+          echo "🧹 Deleting Security Groups..."
+          # Non-default SGs
+          for sg in $(aws ec2 describe-security-groups --region "$AWS_REGION" --query "SecurityGroups[?GroupName!='default'].GroupId" --output text || true); do
+            echo "   → Deleting SG $sg"
+            aws ec2 delete-security-group --group-id "$sg" --region "$AWS_REGION" || true
+          done
+
+          # Explicitly delete EKS cluster SGs
+          CLUSTER_SGS=$(aws ec2 describe-security-groups --region "$AWS_REGION" --filters "Name=group-name,Values=eks-cluster-sg-*" --query "SecurityGroups[].GroupId" --output text || true)
+          for sg in $CLUSTER_SGS; do
+            echo "   → Deleting EKS cluster SG $sg"
+            aws ec2 delete-security-group --group-id "$sg" --region "$AWS_REGION" || true
+          done
+
+      # 8) Purge ECR
       - name: Purge ECR repository
         run: |
           echo "🧹 Purging ECR images..."
@@ -192,7 +169,7 @@ jobs:
             done
           aws ecr delete-repository --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" --force || true
 
-      # 10) Terraform destroy (VPC & friends)
+      # 9) Terraform destroy (VPC & rest)
       - name: Terraform Init
         run: terraform init -reconfigure
 
