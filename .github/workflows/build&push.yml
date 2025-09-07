@@ -1,3 +1,30 @@
+name: Docker Build & Push
+
+on:
+  workflow_dispatch:   # manual trigger only
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: eu-central-1
+      ECR_REGISTRY: 518394500999.dkr.ecr.eu-central-1.amazonaws.com
+      ECR_REPOSITORY: lawyal/flask-app
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::518394500999:role/GitHubActionsRole
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Build & Push Docker image
         run: |
           echo "🐳 Building Docker image..."
