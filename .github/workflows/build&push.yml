@@ -1,41 +1,15 @@
-name: Docker Build & Push
-
-on:
-  workflow_dispatch:   # manual trigger only
-
-permissions:
-  id-token: write
-  contents: read
-
-jobs:
-  docker:
-    runs-on: ubuntu-latest
-    env:
-      AWS_REGION: eu-central-1
-      ECR_REGISTRY: 518394500999.dkr.ecr.eu-central-1.amazonaws.com
-      ECR_REPOSITORY: lawyal/flask-app
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::518394500999:role/GitHubActionsRole
-          aws-region: ${{ env.AWS_REGION }}
-
       - name: Build & Push Docker image
-        id: buildpush
         run: |
           echo "🐳 Building Docker image..."
-
-          # Find latest vX version in ECR
           LAST_VERSION=$(aws ecr list-images \
             --repository-name $ECR_REPOSITORY \
             --region $AWS_REGION \
             --query 'imageIds[].imageTag' \
-            --output text | grep '^v' | sed 's/v//' | sort -n | tail -1)
+            --output text \
+            | grep -E '^version:[0-9]+$' \
+            | sed 's/version://' \
+            | sort -n \
+            | tail -1)
 
           if [ -z "$LAST_VERSION" ]; then
             NEXT_VERSION=1
@@ -43,17 +17,9 @@ jobs:
             NEXT_VERSION=$((LAST_VERSION + 1))
           fi
 
-          VERSION_TAG="v$NEXT_VERSION"
+          VERSION_TAG="version:$NEXT_VERSION"
           echo "➡️ Using version tag: $VERSION_TAG"
-          echo "version_tag=$VERSION_TAG" >> $GITHUB_OUTPUT
 
-          # Build the image
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$VERSION_TAG ./app
-
-          echo "🔑 Logging into ECR..."
           aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
-
-          echo "📦 Pushing image to ECR..."
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$VERSION_TAG
-
-     
